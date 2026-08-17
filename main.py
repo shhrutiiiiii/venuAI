@@ -49,7 +49,7 @@ def get_ai_response(user_input, history):
     messages.append({"role": "user", "content": user_input})
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="groq/compound-mini",
         messages=messages
     )
 
@@ -117,7 +117,7 @@ if __name__ == '__main__':
         history.append({"role": "user", "content": user_input})
 
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="groq/compound-mini",
             messages=history
         )
         answer = response.choices[0].message.content
