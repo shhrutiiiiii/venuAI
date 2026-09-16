@@ -1,0 +1,258 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root, [data-theme="dark"] {
+  /* Stealth Platinum Shimmer Black & Charcoal Grey Theme — Dark Mode */
+  --bg-main: #070709;
+  --bg-panel: #0e0e12;
+  --bg-card: #14141a;
+  --bg-card-hover: #1e1e26;
+  --bg-input: #050507;
+  --border-subtle: rgba(255, 255, 255, 0.16);
+  --border-hover: rgba(255, 255, 255, 0.45);
+  --border-focus: #ffffff;
+  --text-main: #f8fafc;
+  --text-muted: #a1a1aa;
+  --text-subtle: #71717a;
+  --primary-accent: #ffffff;
+  --primary-gradient: linear-gradient(135deg, #ffffff 0%, #e4e4e7 40%, #71717a 100%);
+  --primary-hover: #e4e4e7;
+  --btn-text: #08080a;
+  --badge-bg: rgba(255, 255, 255, 0.12);
+  --badge-border: rgba(255, 255, 255, 0.28);
+  --badge-text: #ffffff;
+  --shadow-card: 0 20px 45px -12px rgba(0, 0, 0, 0.95), 0 0 0 1px rgba(255, 255, 255, 0.14);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.25);
+  --scrollbar-hover: rgba(255, 255, 255, 0.5);
+  --radar-grid: rgba(255, 255, 255, 0.05);
+}
+
+[data-theme="light"] {
+  /* Shimmery Pearl Silver & Slate Black — Light Mode */
+  --bg-main: #f4f4f5;
+  --bg-panel: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-hover: #e4e4e7;
+  --bg-input: #e4e4e7;
+  --border-subtle: #d4d4d8;
+  --border-hover: #93939e;
+  --border-focus: #18181b;
+  --text-main: #09090b;
+  --text-muted: #52525b;
+  --text-subtle: #71717a;
+  --primary-accent: #18181b;
+  --primary-gradient: linear-gradient(135deg, #18181b 0%, #3f3f46 100%);
+  --primary-hover: #27272a;
+  --btn-text: #ffffff;
+  --badge-bg: rgba(24, 24, 27, 0.08);
+  --badge-border: rgba(24, 24, 27, 0.25);
+  --badge-text: #18181b;
+  --shadow-card: 0 12px 32px -8px rgba(9, 9, 11, 0.1), 0 2px 6px -1px rgba(9, 9, 11, 0.05);
+  --scrollbar-thumb: rgba(113, 113, 122, 0.25);
+  --scrollbar-hover: rgba(24, 24, 27, 0.5);
+  --radar-grid: rgba(9, 9, 11, 0.04);
+}
+
+@theme inline {
+  --color-background: var(--bg-main);
+  --color-foreground: var(--text-main);
+  --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--bg-main);
+  color: var(--text-main);
+  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-hover);
+}
+
+/* Tactical Grid Background Overlay */
+.drdo-radar-bg {
+  background-image: radial-gradient(var(--radar-grid) 1.5px, transparent 1.5px);
+  background-size: 24px 24px;
+}
+
+/* Metallic Shimmering Gradient Text Animation */
+@keyframes metallicShimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer-text {
+  background: linear-gradient(110deg, #a1a1aa 20%, #ffffff 50%, #a1a1aa 80%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: metallicShimmer 4s linear infinite;
+}
+
+.genz-gradient-text {
+  background: linear-gradient(135deg, #18181b 0%, #52525b 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+[data-theme="dark"] .genz-gradient-text {
+  background: linear-gradient(135deg, #ffffff 0%, #a1a1aa 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Glassmorphic & Shiny Metallic Decent Card Container */
+.decent-card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: blur(14px);
+  transition: background-color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease, transform 0.2s ease;
+}
+
+[data-theme="dark"] .decent-card {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 20px 45px -12px rgba(0, 0, 0, 0.95), 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+/* Shimmery Interactive Card with Sweeping Light Beam */
+.decent-card-interactive {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: blur(14px);
+  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.25s ease, transform 0.2s ease;
+}
+
+.decent-card-interactive::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -150%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.12) 50%,
+    transparent 100%
+  );
+  transform: skewX(-25deg);
+  transition: left 0.75s ease-in-out;
+  pointer-events: none;
+}
+
+.decent-card-interactive:hover::before {
+  left: 150%;
+}
+
+.decent-card-interactive:hover {
+  border-color: rgba(255, 255, 255, 0.5);
+  transform: translateY(-3px);
+  box-shadow: 0 16px 40px -8px rgba(255, 255, 255, 0.2), 0 0 15px rgba(255, 255, 255, 0.1);
+}
+
+/* Input focus glow */
+.input-glow:focus-within {
+  box-shadow: 0 0 0 2px var(--border-focus);
+  border-color: var(--border-focus) !important;
+}
+
+/* Spin animation for loader */
+@keyframes spin-smooth {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spin-smooth {
+  animation: spin-smooth 0.8s linear infinite;
+}
+
+/* Shimmer Pulse animation */
+@keyframes radarPulse {
+  0% { transform: scale(0.95); opacity: 0.85; box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.35); }
+  70% { transform: scale(1.05); opacity: 1; box-shadow: 0 0 0 14px rgba(255, 255, 255, 0); }
+  100% { transform: scale(0.95); opacity: 0.85; box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+}
+
+.radar-pulse {
+  animation: radarPulse 2.5s infinite cubic-bezier(0.4, 0, 0.6, 1);
+}
+
+/* Shiny Metallic Badge Shimmer Sweep */
+@keyframes shimmerSweep {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer-badge {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.08) 0%,
+    rgba(255, 255, 255, 0.28) 50%,
+    rgba(255, 255, 255, 0.08) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmerSweep 3s infinite linear;
+}
+
+/* Fade in up */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in-up {
+  animation: fadeInUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Shiny Glowing card effect */
+.glow-card {
+  position: relative;
+}
+.glow-card::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.7), rgba(161, 161, 170, 0.3), rgba(255, 255, 255, 0.8));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}

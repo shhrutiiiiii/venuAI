@@ -1,0 +1,293 @@
+{
+  "organization": {
+    "name": "Defence Research and Development Organisation (DRDO)",
+    "hindi_name": "रक्षा अनुसंधान एवं विकास संगठन",
+    "established": 1958,
+    "headquarters": "DRDO Bhawan, New Delhi, India",
+    "motto": "बलस्य मूलं विज्ञानम् (Strength's Origin is in Science)",
+    "parent_ministry": "Ministry of Defence, Government of India",
+    "chairman_role": "Secretary, Department of Defence R&D and Chairman, DRDO",
+    "overview": "DRDO is the premier R&D wing of the Ministry of Defence, armed with a network of over 50 laboratories working across aeronautics, armaments, electronics, combat vehicles, engineering systems, missiles, advanced computing, life sciences, and naval systems."
+  },
+  "clusters": [
+    {
+      "cluster_name": "Missiles & Strategic Systems (MSS)",
+      "focus": "Design, development, and strategic deployment of missile systems, rocket propellants, guidance avionics, and hypersonic flight technologies.",
+      "laboratories": [
+        {
+          "code": "DRDL",
+          "name": "Defence Research and Development Laboratory",
+          "location": "Hyderabad, Telangana",
+          "key_projects": ["Agni Ballistic Missiles", "Prithvi Missiles", "Akash SAM", "Helina", "Nag ATGM"],
+          "specialization": "Design & development of tactical and strategic missile systems."
+        },
+        {
+          "code": "RCI",
+          "name": "Research Centre Imarat",
+          "location": "Hyderabad, Telangana",
+          "key_projects": ["Avionics", "Optical & Radar Seekers", "Navigation Systems", "Control Actuation"],
+          "specialization": "Pioneer lab in missile avionics, inertial navigation systems, and terminal seekers."
+        },
+        {
+          "code": "ASL",
+          "name": "Advanced Systems Laboratory",
+          "location": "Hyderabad, Telangana",
+          "key_projects": ["Agni-V ICBM", "Solid Rocket Motors", "Composite Rocket Motor Casings"],
+          "specialization": "Solid propellant rocket motors, carbon-composite structures, and strategic long-range systems."
+        }
+      ]
+    },
+    {
+      "cluster_name": "Electronics & Communication Systems (ECS)",
+      "focus": "Advanced radar systems, electronic warfare (EW) suites, tactical communications, lasers, and electro-optics.",
+      "laboratories": [
+        {
+          "code": "LRDE",
+          "name": "Electronics and Radar Development Establishment",
+          "location": "Bengaluru, Karnataka",
+          "key_projects": ["Uttam AESA Radar", "Rajendra Radar", "Swathi Weapon Locating Radar", "Rohini 3D Radar"],
+          "specialization": "Design and development of advanced radar and sensor systems for Army, Air Force, and Navy."
+        },
+        {
+          "code": "DLRL",
+          "name": "Defence Electronics Research Laboratory",
+          "location": "Hyderabad, Telangana",
+          "key_projects": ["Samyukta EW System", "Sangraha Naval EW", "Divya Drishti ESM"],
+          "specialization": "Electronic Warfare systems, SIGINT, COMINT, and radar jamming technologies."
+        },
+        {
+          "code": "DEAL",
+          "name": "Defence Electronics Applications Laboratory",
+          "location": "Dehradun, Uttarakhand",
+          "key_projects": ["Software Defined Radios (SDR)", "Satellite Communication Terminals", "Data Links"],
+          "specialization": "Tactical communication systems, millimeter-wave technologies, and SATCOM."
+        }
+      ]
+    },
+    {
+      "cluster_name": "Aeronautical Systems (AERO)",
+      "focus": "Fighter aircraft technologies, UAVs, airborne surveillance, aero-engines, and target aircraft.",
+      "laboratories": [
+        {
+          "code": "ADE",
+          "name": "Aeronautical Development Establishment",
+          "location": "Bengaluru, Karnataka",
+          "key_projects": ["TAPAS-BH-201 (Rustom-II)", "Ghatak UCAV", "Abhyas HEAT target", "Nishant UAV"],
+          "specialization": "Unmanned Aerial Vehicles (UAVs), flight control systems, and flight simulators."
+        },
+        {
+          "code": "GTRE",
+          "name": "Gas Turbine Research Establishment",
+          "location": "Bengaluru, Karnataka",
+          "key_projects": ["Kaveri Engine", "Dry Kaveri derivative for Ghatak", "Small Turbofan Engine"],
+          "specialization": "Design and development of aero gas turbine engines for military aircraft."
+        },
+        {
+          "code": "CABS",
+          "name": "Centre for Airborne Systems",
+          "location": "Bengaluru, Karnataka",
+          "key_projects": ["NETRA Airborne Early Warning & Control (AEW&C)", "Airborne Radar Systems"],
+          "specialization": "Design, integration, and evaluation of airborne surveillance and command systems."
+        }
+      ]
+    },
+    {
+      "cluster_name": "Armaments & Combat Engineering (ACE)",
+      "focus": "Tanks, armored vehicles, artillery guns, high explosives, rocketry, and infantry weapons.",
+      "laboratories": [
+        {
+          "code": "CVRDE",
+          "name": "Combat Vehicles Research and Development Establishment",
+          "location": "Avadi, Chennai, Tamil Nadu",
+          "key_projects": ["Arjun Main Battle Tank (Mk-1A)", "WhAP (Wheeled Armoured Platform)", "Unmanned Ground Vehicles"],
+          "specialization": "Tracked and wheeled combat vehicles, automotive systems, and tank transmissions."
+        },
+        {
+          "code": "ARDE",
+          "name": "Armament Research and Development Establishment",
+          "location": "Pune, Maharashtra",
+          "key_projects": ["Pinaka Multi-Barrel Rocket Launcher", "ATAGS 155mm/52 Calibre Howitzer", "INSAS Rifle"],
+          "specialization": "Conventional armament, small arms, tank guns, and artillery systems."
+        },
+        {
+          "code": "HEMRL",
+          "name": "High Energy Materials Research Laboratory",
+          "location": "Pune, Maharashtra",
+          "key_projects": ["High Explosives", "Solid Propellants for Missiles", "Pyrotechnics"],
+          "specialization": "Research on high energy formulations, propellants, explosives, and pyrotechnics."
+        }
+      ]
+    },
+    {
+      "cluster_name": "Naval Systems & Materials (NSM)",
+      "focus": "Sonar systems, underwater weapons, torpedoes, naval stealth, and strategic defense metallurgy.",
+      "laboratories": [
+        {
+          "code": "NPOL",
+          "name": "Naval Physical and Oceanographic Laboratory",
+          "location": "Kochi, Kerala",
+          "key_projects": ["HUMSA Sonar", "USHUS Submarine Sonar", "ALTAS Towed Array Sonar"],
+          "specialization": "Underwater surveillance, sonar systems, and oceanographic research."
+        },
+        {
+          "code": "NSTL",
+          "name": "Naval Science and Technological Laboratory",
+          "location": "Visakhapatnam, Andhra Pradesh",
+          "key_projects": ["Varunastra Heavyweight Torpedo", "Shyena Light Weight Torpedo", "Mareech Anti-Torpedo Decoy"],
+          "specialization": "Underwater weapons, warship hydrodynamics, stealth technology, and mines."
+        },
+        {
+          "code": "DMRL",
+          "name": "Defence Metallurgical Research Laboratory",
+          "location": "Hyderabad, Telangana",
+          "key_projects": ["Titanium Alloys for Aircraft", "Single Crystal Blades", "DMR-249 Armor Steel"],
+          "specialization": "Advanced metallurgical research, high-temperature alloys, and armor materials."
+        }
+      ]
+    },
+    {
+      "cluster_name": "Life Sciences (LS)",
+      "focus": "Human engineering, high-altitude physiology, bio-defense, combat rations, and aviation medicine.",
+      "laboratories": [
+        {
+          "code": "DEBEL",
+          "name": "Defence Bioengineering and Electromedical Laboratory",
+          "location": "Bengaluru, Karnataka",
+          "key_projects": ["Integrated Life Support Systems (ILSS)", "On-Board Oxygen Generation (OBOGS)", "Submarine Escape Suit"],
+          "specialization": "Life support systems, protective gear for fighter pilots and submariners."
+        },
+        {
+          "code": "DFRL",
+          "name": "Defence Food Research Laboratory",
+          "location": "Mysuru, Karnataka",
+          "key_projects": ["Ready-to-Eat Combat Rations", "Space Food for Gaganyaan", "Self-Heating Food Packs"],
+          "specialization": "Food technology, preservation, and specialized rations for troops in extreme environments."
+        },
+        {
+          "code": "DIPAS",
+          "name": "Defence Institute of Physiology and Allied Sciences",
+          "location": "Delhi",
+          "key_projects": ["High Altitude Adaptability Research", "Extreme Cold Clothing Systems", "Siachen Physiology Studies"],
+          "specialization": "Human performance optimization in extreme high-altitude and desert environments."
+        }
+      ]
+    },
+    {
+      "cluster_name": "DRDO Young Scientist Laboratories (DYSL)",
+      "focus": "Nurturing cutting-edge disruptive technologies through independent young scientist teams under 35 years of age.",
+      "laboratories": [
+        {
+          "code": "DYSL-AI",
+          "name": "DYSL - Artificial Intelligence",
+          "location": "Bengaluru, Karnataka",
+          "key_projects": ["Military AI", "Autonomous Target Recognition", "NLP for Defense Intelligence"],
+          "specialization": "Artificial intelligence, computer vision, and machine learning for defense applications."
+        },
+        {
+          "code": "DYSL-QT",
+          "name": "DYSL - Quantum Technologies",
+          "location": "Mumbai, Maharashtra",
+          "key_projects": ["Quantum Key Distribution (QKD)", "Quantum Sensing", "Quantum Encryption"],
+          "specialization": "Secure quantum communication and quantum sensors."
+        },
+        {
+          "code": "DYSL-CT",
+          "name": "DYSL - Cognitive Technologies",
+          "location": "Chennai, Tamil Nadu",
+          "key_projects": ["Cognitive Robotics", "Brain-Computer Interface", "Operator Workload Monitoring"],
+          "specialization": "Human-machine interaction, cognitive workload analysis, and adaptive systems."
+        },
+        {
+          "code": "DYSL-SM",
+          "name": "DYSL - Smart Materials",
+          "location": "Hyderabad, Telangana",
+          "key_projects": ["Shape Memory Alloys", "Self-Healing Materials", "Piezoelectric Sensors"],
+          "specialization": "Advanced smart materials and adaptive structural metamaterials."
+        },
+        {
+          "code": "DYSL-AT",
+          "name": "DYSL - Asymmetric Technologies",
+          "location": "Kolkata, West Bengal",
+          "key_projects": ["Drone Swarm Interception", "Directed Energy Weapons Concept", "Micro-UAVs"],
+          "specialization": "Unconventional warfare solutions and disruptive asymmetric defense tech."
+        }
+      ]
+    }
+  ],
+  "major_weapons_and_platforms": [
+    {
+      "name": "Agni-V",
+      "category": "Ballistic Missile System",
+      "type": "Intercontinental Ballistic Missile (ICBM)",
+      "range": "5,000 - 8,000 km",
+      "payload": "Nuclear / Conventional (1,500 kg), MIRV capable",
+      "developed_by": "ASL & DRDL (Hyderabad)",
+      "status": "Inducted into Strategic Forces Command (SFC)",
+      "key_feature": "3-stage solid fuel canisterized launch system providing rapid deployment capability."
+    },
+    {
+      "name": "Tejas (LCA)",
+      "category": "Aeronautical Combat Aircraft",
+      "type": "4.5 Generation Light Combat Aircraft",
+      "range": "3,000 km ferry range",
+      "developed_by": "ADA & DRDO labs in partnership with HAL",
+      "status": "Active service in Indian Air Force (No. 45 Flying Daggers squadron)",
+      "key_feature": "Tailless compound delta wing design with advanced digital Fly-By-Wire control and glass cockpit."
+    },
+    {
+      "name": "Uttam AESA Radar",
+      "category": "Radar & Avionics",
+      "type": "Active Electronically Scanned Array Radar",
+      "developed_by": "LRDE (Bengaluru)",
+      "status": "Selected for Tejas Mk-1A and Mk-2 fighter jets",
+      "key_feature": "Fully indigenous solid-state TR modules capable of simultaneous tracking of up to 50 targets."
+    },
+    {
+      "name": "BrahMos",
+      "category": "Cruise Missile",
+      "type": "Supersonic Cruise Missile (World's fastest operational cruise missile)",
+      "speed": "Mach 2.8 to Mach 3.0",
+      "range": "290 km to 450+ km",
+      "developed_by": "BrahMos Aerospace (Joint venture between DRDO, India & NPOM, Russia)",
+      "status": "Operational across Indian Army, Navy, and Air Force (Sukhoi Su-30MKI platform)",
+      "key_feature": "Fire-and-forget trajectory with sea-skimming capability and high kinetic energy impact."
+    },
+    {
+      "name": "Pinaka MBRL",
+      "category": "Armament & Artillery",
+      "type": "Multi-Barrel Rocket Launcher System",
+      "range": "40 km (Mk-I), 75 km (Guided Pinaka)",
+      "developed_by": "ARDE (Pune)",
+      "status": "Operational in Indian Army (Exported to international allies like Armenia)",
+      "key_feature": "Fires a salvo of 12 high-explosive rockets in 44 seconds, destroying target area of 3.9 sq km."
+    },
+    {
+      "name": "TAPAS-BH-201 (Rustom-II)",
+      "category": "Unmanned Aerial Vehicle",
+      "type": "Medium-Altitude Long-Endurance (MALE) UAV",
+      "endurance": "24+ hours at 28,000 ft",
+      "developed_by": "ADE (Bengaluru)",
+      "status": "Under advanced user trials",
+      "key_feature": "Satellite-controlled real-time ISR (Intelligence, Surveillance, and Reconnaissance) payload capability."
+    },
+    {
+      "name": "Akash SAM System",
+      "category": "Surface-to-Air Missile",
+      "type": "Medium Range Surface-to-Air Missile Shield",
+      "range": "30 km distance, 18 km altitude",
+      "developed_by": "DRDL (Hyderabad) & LRDE (Bengaluru)",
+      "status": "Operational in Indian Army & Air Force",
+      "key_feature": "Guided by Rajendra 3D Phased Array Radar; capable of engaging multiple air targets simultaneously."
+    },
+    {
+      "name": "Astra Mk-1",
+      "category": "Air-to-Air Missile",
+      "type": "Beyond Visual Range Air-to-Air Missile (BVRAAM)",
+      "range": "110+ km",
+      "speed": "Mach 4.5+",
+      "developed_by": "DRDL & RCI (Hyderabad)",
+      "status": "Inducted into Indian Air Force (Sukhoi Su-30MKI, Tejas)",
+      "key_feature": "All-weather day/night interceptor with smokeless rocket motor and active RF seeker."
+    }
+  ]
+}
