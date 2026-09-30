@@ -31,13 +31,13 @@ export default function DemoCredentialsBadge({
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <ShieldCheck className="w-4 h-4" style={{ color: "var(--text-main)" }} />
+          <ShieldCheck className="w-4 h-4 text-cyan-500" />
           <span className="text-xs font-black tracking-wide uppercase" style={{ color: "var(--text-main)" }}>
-            ⚡ INSTANT SANDBOX LOGIN
+            ⚡ DRDO DEMO CREDENTIALS
           </span>
         </div>
         <span className="text-[10px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider" style={{ background: "var(--badge-bg)", color: "var(--badge-text)", border: "1px solid var(--badge-border)" }}>
-          ONE-CLICK
+          ONE-CLICK AUTOFILL
         </span>
       </div>
 
@@ -55,7 +55,7 @@ export default function DemoCredentialsBadge({
           >
             <div>
               <span className="text-[10px] uppercase font-black block tracking-wider" style={{ color: "var(--text-main)" }}>
-                🚀 DEMO USER
+                🔬 DRDO SCIENTIST
               </span>
               <span className="text-[11px] font-semibold block truncate" style={{ color: "var(--text-muted)" }}>
                 demo@chat.com
@@ -76,8 +76,8 @@ export default function DemoCredentialsBadge({
             }}
           >
             <div>
-              <span className="text-[10px] uppercase font-black block tracking-wider" style={{ color: "var(--text-main)" }}>
-                👑 ADMIN LEAD
+              <span className="text-[10px] uppercase font-black block tracking-wider text-cyan-400">
+                🛡️ LAB DIRECTOR
               </span>
               <span className="text-[11px] font-semibold block truncate" style={{ color: "var(--text-muted)" }}>
                 admin@chat.com

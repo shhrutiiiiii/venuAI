@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "venuai-drdo": {
+      "command": "python",
+      "args": ["VENUAI/mcp_server.py"],
+      "description": "VenuAI DRDO Knowledge Base — search, query, and upload DRDO research documents",
+      "env": {
+        "GROQ_API_KEY": "${GROQ_API_KEY}"
+      }
+    }
+  }
+}

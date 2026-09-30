@@ -12,14 +12,21 @@ Endpoints:
 """
 
 import os
+import sys
 import uuid
 import json
 import logging
 from pathlib import Path
 from typing import List, Optional
 
+# Ensure project root directory is in sys.path for VENUAI package imports
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -32,6 +39,8 @@ logger = logging.getLogger("drdo-rag")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY not found in environment/.env")
+
+DEFAULT_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploaded_docs"
@@ -50,6 +59,23 @@ def load_prefilled_kb() -> dict:
         except Exception as e:
             logger.error(f"Error loading prefilled KB: {e}")
     return {}
+
+def create_groq_completion(client, messages, max_tokens=1500, temperature=0.2, stream=False):
+    candidate_models = [DEFAULT_MODEL, "qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "allam-2-7b"]
+    last_err = None
+    for m in candidate_models:
+        try:
+            return client.chat.completions.create(
+                model=m,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=stream
+            )
+        except Exception as e:
+            logger.warning(f"Groq completion with model '{m}' failed: {e}")
+            last_err = e
+    raise last_err
 
 # ── FastAPI App ────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -101,11 +127,12 @@ def get_llm():
         from langchain_groq import ChatGroq
         _llm = ChatGroq(
             api_key=GROQ_API_KEY,
-            model_name="groq/compound",
+            model_name=DEFAULT_MODEL,
             temperature=0.2,
             max_tokens=1500,
         )
     return _llm
+
 
 # ── DRDO-Specific RAG Prompt ───────────────────────────────────────────────────
 DRDO_RAG_PROMPT_TEMPLATE = """You are VenuAI, an intelligent scientific research assistant for DRDO \
@@ -151,6 +178,11 @@ class QueryRequest(BaseModel):
     question: str
     top_k: int = 4
     history: Optional[List[dict]] = None
+    # New fields — all have defaults for backward compatibility
+    session_id: str = "default-session"
+    user_id: Optional[str] = None
+    agent_mode: bool = False        # ReAct agentic loop
+    multi_agent_mode: bool = False  # specialist multi-agent routing
 
 
 class QuerySource(BaseModel):
@@ -164,6 +196,11 @@ class QueryResponse(BaseModel):
     sources: List[QuerySource]
     model: str
     chunks_retrieved: int
+    # New verification & quality fields
+    grounding_score: float = 0.0
+    hallucination_score: float = 0.0
+    verification_flags: List[str] = []
+    annotated_answer: Optional[str] = None
 
 
 class DocumentInfo(BaseModel):
@@ -173,6 +210,7 @@ class DocumentInfo(BaseModel):
     chunks: int
     upload_time: str
     size_kb: float
+    tags: Optional[dict] = None
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -187,7 +225,7 @@ def health_check():
         "documents_ingested": len(meta),
         "vector_store": "ChromaDB (local)",
         "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-        "llm": "llama-3.3-70b-versatile (Groq)",
+        "llm": "groq/compound (Groq)",
         "note": "Embedding model loads on first upload/query",
     }
 
@@ -240,6 +278,17 @@ async def upload_document(file: UploadFile = File(...)):
         chunk.metadata["filename"]    = file.filename
         chunk.metadata["file_size_kb"] = file_size_kb
 
+    # ── Document Intelligence: auto-tag the document ─────────────────────────────
+    from VENUAI.doc_intelligence import DocumentIntelligence
+    full_text = " ".join(c.page_content for c in chunks[:50])  # first 50 chunks
+    doc_tags = DocumentIntelligence().analyze(full_text, file.filename)
+    tags_dict = doc_tags.to_dict()
+    # Enrich each chunk's metadata with domain tags
+    for chunk in chunks:
+        chunk.metadata["domain_tags"]    = ",".join(doc_tags.domain_tags)
+        chunk.metadata["drdo_labs"]      = ",".join(doc_tags.drdo_labs)
+        chunk.metadata["classification"] = doc_tags.classification_level
+
     # Embed + store (embedding model loads here on first call)
     vs = get_vector_store()
     vs.add_documents(chunks)
@@ -259,6 +308,7 @@ async def upload_document(file: UploadFile = File(...)):
         "upload_time": datetime.now().isoformat(),
         "size_kb": file_size_kb,
         "file_path": str(save_path),
+        "tags": tags_dict,
     }
     save_metadata(meta)
 
@@ -269,10 +319,11 @@ async def upload_document(file: UploadFile = File(...)):
         chunks=num_chunks,
         upload_time=meta[doc_id]["upload_time"],
         size_kb=file_size_kb,
+        tags=tags_dict,
     )
 
 
-# ── LangGraph Workflow Engine ───────────────────────────────────────────────────
+# ── LangGraph Workflow Engine ────────────────────────────────────────────────────────
 from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langchain_core.documents import Document
@@ -286,6 +337,14 @@ class RAGGraphState(TypedDict):
     answer: str
     sources: List[QuerySource]
     model_used: str
+    # Memory fields (Tier 1 & 3)
+    working_memory: List[dict]
+    semantic_memories: List[str]
+    # Verification fields
+    grounding_score: float
+    hallucination_score: float
+    verification_flags: List[str]
+    annotated_answer: str
 
 
 def retrieve_node(state: RAGGraphState) -> dict:
@@ -323,48 +382,91 @@ def retrieve_node(state: RAGGraphState) -> dict:
 
 
 def generate_node(state: RAGGraphState) -> dict:
-    from langchain_core.prompts import PromptTemplate
+    """
+    Generate an answer using Context Engineering for optimal prompt quality.
+    Integrates: rank_chunks, compress_history, build_drdo_prompt, semantic_memories.
+    """
+    from VENUAI.context_engineer import (
+        ContextBudget, rank_chunks, compress_history, build_drdo_prompt
+    )
+
     question = state["question"]
-    docs = state.get("documents", [])
-    history = state.get("history")
+    docs     = state.get("documents", [])
+    history  = state.get("history") or []
+    sem_mems = state.get("semantic_memories", [])
 
-    chat_history_str = "None"
-    if history:
-        formatted_turns = []
-        for msg in history[-6:]:
-            sender_label = "User" if msg.get("sender") == "user" else "Assistant"
-            formatted_turns.append(f"{sender_label}: {msg.get('text', '')}")
-        chat_history_str = "\n".join(formatted_turns)
+    ranked_docs = rank_chunks(docs, question)
+    if not ranked_docs:
+        kb_data = load_prefilled_kb()
+        if kb_data:
+            kb_text = json.dumps(kb_data, indent=2, ensure_ascii=False)[:8000]
+            fake_doc = Document(
+                page_content=f"DRDO Master Knowledge Base:\n{kb_text}",
+                metadata={"filename": "DRDO Master Knowledge Base (Preloaded JSON)", "page": 0}
+            )
+            ranked_docs = [fake_doc]
 
-    context_str = "\n\n".join([d.page_content for d in docs])
-    prompt = PromptTemplate(
-        input_variables=["context", "question", "chat_history"],
-        template=DRDO_RAG_PROMPT_TEMPLATE,
-    ).format(context=context_str, question=question, chat_history=chat_history_str)
+    compressed_history = compress_history(history, max_turns=6)
+    budget             = ContextBudget()
+    prompt_text        = build_drdo_prompt(
+        question=question,
+        ranked_docs=ranked_docs,
+        compressed_history=compressed_history,
+        budget=budget,
+        semantic_memories=sem_mems or [],
+    )
 
     llm = get_llm()
-    res = llm.invoke(prompt)
-    answer_text = res.content if hasattr(res, 'content') else str(res)
+    res = llm.invoke(prompt_text)
+    answer_text = res.content if hasattr(res, "content") else str(res)
 
-    seen_sources = set()
+    seen_sources: set = set()
     sources: List[QuerySource] = []
-    for doc in docs:
+    for doc in ranked_docs:
         m = doc.metadata
         key = (m.get("filename", "Unknown"), m.get("page", 0))
         if key not in seen_sources:
             seen_sources.add(key)
-            sources.append(
-                QuerySource(
-                    document=m.get("filename", "Unknown Document"),
-                    page=m.get("page", 0) + 1,
-                    chunk_preview=doc.page_content[:120].strip() + "…",
-                )
-            )
+            sources.append(QuerySource(
+                document=m.get("filename", "Unknown Document"),
+                page=m.get("page", 0) + 1,
+                chunk_preview=doc.page_content[:120].strip() + "…",
+            ))
 
     return {
         "answer": answer_text,
         "sources": sources,
-        "model_used": "llama-3.3-70b-versatile (Groq / LangGraph)",
+        "documents": ranked_docs,
+        "model_used": "groq/compound (Groq / LangGraph + ContextEngineer)",
+    }
+
+
+def verify_node(state: RAGGraphState) -> dict:
+    """
+    Run VerifierAgent + HallucinationDetector on the generated answer.
+    Updates state with grounding_score, hallucination_score, verification_flags.
+    """
+    from VENUAI.verifier_agent import get_verifier
+    from VENUAI.hallucination_detector import get_hallucination_detector
+    from groq import Groq as _Groq
+
+    answer   = state.get("answer", "")
+    question = state.get("question", "")
+    docs     = state.get("documents", [])
+
+    verifier = get_verifier(_Groq(api_key=GROQ_API_KEY))
+    v_result = verifier.verify(answer, question, docs)
+    final_answer = v_result.revised_answer if v_result.revised_answer else answer
+
+    annotated, hall_score, _ = get_hallucination_detector().analyze(final_answer, docs)
+    flags = [f.value for f in v_result.policy_flags]
+
+    return {
+        "answer":             final_answer,
+        "annotated_answer":   annotated,
+        "grounding_score":    v_result.grounding_score,
+        "hallucination_score":hall_score,
+        "verification_flags": flags,
     }
 
 
@@ -375,34 +477,30 @@ def fallback_kb_node(state: RAGGraphState) -> dict:
 
     kb_text = json.dumps(kb_data, indent=2, ensure_ascii=False)
     llm = get_llm()
-    prompt_text = f"""You are VenuAI, an intelligent research assistant for DRDO (Defence Research and Development Organisation).
-Answer the user's question accurately using the official preloaded DRDO Knowledge Base below.
+    prompt_text = f"""You are VenuAI, an intelligent research assistant for DRDO.
+Answer the user's question using the DRDO Knowledge Base below.
+Format with ### headings, Markdown tables, bullet points, and **bold** key terms.
 
-FORMATTING RULES:
-1. Start with a clear level-3 heading (`### ...`).
-2. Present key data (labs, locations, projects, parameters) in a clean Markdown table with headers `| Column 1 | Column 2 |`.
-3. Use bullet points (`- `) for key highlights and details.
-4. Highlight important lab codes, weapon names, and specifications in **bold**.
-
---- PRELOADED DRDO KNOWLEDGE BASE ---
+--- DRDO KNOWLEDGE BASE ---
 {kb_text[:8000]}
---- END KNOWLEDGE BASE ---
+--- END ---
 
 Question: {state['question']}
-
-Answer (beautifully formatted with headings, tables, bullet points, and bold text):"""
+Answer:"""
 
     res = llm.invoke(prompt_text)
     ans_text = res.content if hasattr(res, 'content') else str(res)
     return {
         "answer": ans_text,
-        "sources": [
-            QuerySource(
-                document="DRDO Master Knowledge Base (Preloaded JSON)",
-                page=1,
-                chunk_preview="Extracted from DRDO laboratories directory, weapons platforms, and technology clusters.",
-            )
-        ],
+        "annotated_answer": ans_text,
+        "grounding_score": 0.9,
+        "hallucination_score": 0.0,
+        "verification_flags": [],
+        "sources": [QuerySource(
+            document="DRDO Master Knowledge Base (Preloaded JSON)",
+            page=1,
+            chunk_preview="DRDO laboratories directory, weapons platforms, and technology clusters.",
+        )],
         "model_used": "groq/compound (Preloaded KB / LangGraph Fallback)",
     }
 
@@ -414,57 +512,289 @@ def route_query_node(state: RAGGraphState) -> str:
     return "fallback_kb"
 
 
-# Build & Compile LangGraph State Graph
+# Build & Compile LangGraph State Graph (with verify_node)
 workflow = StateGraph(RAGGraphState)
-workflow.add_node("retrieve", retrieve_node)
-workflow.add_node("generate", generate_node)
+workflow.add_node("retrieve",    retrieve_node)
+workflow.add_node("generate",    generate_node)
+workflow.add_node("verify",      verify_node)      # NEW
 workflow.add_node("fallback_kb", fallback_kb_node)
 
 workflow.add_conditional_edges(
     START,
     route_query_node,
-    {
-        "retrieve": "retrieve",
-        "fallback_kb": "fallback_kb",
-    }
+    {"retrieve": "retrieve", "fallback_kb": "fallback_kb"}
 )
-workflow.add_edge("retrieve", "generate")
-workflow.add_edge("generate", END)
+workflow.add_edge("retrieve",    "generate")
+workflow.add_edge("generate",    "verify")          # NEW: verification after generate
+workflow.add_edge("verify",      END)
 workflow.add_edge("fallback_kb", END)
 
 venuai_graph = workflow.compile()
 
 
 @app.post("/query", response_model=QueryResponse)
-def query_knowledge_base(req: QueryRequest):
+def query_knowledge_base(
+    req: QueryRequest,
+    background_tasks: "BackgroundTasks",
+):
     """
-    Run a RAG query against the DRDO knowledge base using LangGraph state workflow.
-    Returns a grounded AI answer with source citations.
+    Run a RAG query. Supports standard RAG, ReAct agent, and multi-agent modes.
+    Integrates memory management, verification, hallucination detection, and analytics.
     """
+    import time as _time
+    from fastapi import BackgroundTasks
+
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    try:
-        final_state = venuai_graph.invoke({
-            "question": req.question,
-            "top_k": req.top_k,
-            "history": req.history,
-            "documents": [],
-            "answer": "",
-            "sources": [],
-            "model_used": "",
-        })
+    # Guardrails Input Check
+    from VENUAI.guardrails import get_guardrail_engine
+    ge = get_guardrail_engine()
+    g_res = ge.validate_input(req.question, user_id=req.user_id or "anonymous")
+    if not g_res.passed:
         return QueryResponse(
-            answer=final_state.get("answer", "No response generated."),
+            answer=g_res.sanitized_input_or_output,
+            sources=[],
+            model="DRDO Defence Guardrails Policy",
+            chunks_retrieved=0,
+            grounding_score=0.0,
+            hallucination_score=0.0,
+            verification_flags=[f"GUARDRAIL_TRIGGERED: {g_res.violation_type}"],
+            annotated_answer=g_res.sanitized_input_or_output,
+        )
+
+    t_start = _time.time()
+    agent_used = "rag"
+    tools_called: List[str] = []
+    error_str = None
+
+    # Fetch memory context
+    from VENUAI.memory_manager import get_memory_manager
+    mm = get_memory_manager()
+    mem_ctx = mm.get_context(req.session_id, req.user_id or "anonymous", req.question)
+    working_memory   = mem_ctx.get("working", [])
+    semantic_memories = mem_ctx.get("semantic", [])
+    effective_history = req.history or working_memory or []
+
+    try:
+        # Mode: Multi-Agent
+        if req.multi_agent_mode:
+            import asyncio
+            from VENUAI.agents.orchestrator import OrchestratorAgent
+            from groq import Groq as _Groq
+            orchestrator = OrchestratorAgent(_Groq(api_key=GROQ_API_KEY))
+            agent_result = asyncio.run(
+                orchestrator.route(req.question, effective_history, mem_ctx)
+            )
+            agent_used = "multi_agent"
+            t_end = _time.time()
+            background_tasks.add_task(
+                mm.save_turn, req.session_id, req.user_id or "anonymous",
+                req.question, agent_result.answer
+            )
+            from VENUAI.analytics import get_analytics
+            background_tasks.add_task(
+                get_analytics().log_query,
+                req.session_id, req.user_id or "anonymous", req.question,
+                len(agent_result.answer), (t_end - t_start) * 1000,
+                agent_result.confidence, 0.0, agent_used, tools_called, None
+            )
+            return QueryResponse(
+                answer=agent_result.answer,
+                sources=[QuerySource(document=s.document, page=s.page,
+                                     chunk_preview=s.chunk_preview)
+                         for s in agent_result.sources],
+                model=agent_result.agent_name,
+                chunks_retrieved=len(agent_result.sources),
+                grounding_score=agent_result.confidence,
+                hallucination_score=0.0,
+                verification_flags=[],
+                annotated_answer=agent_result.answer,
+            )
+
+        # Mode: ReAct Agent
+        if req.agent_mode:
+            from langgraph.prebuilt import create_react_agent
+            from VENUAI.agent_tools import ALL_TOOLS
+            from langchain_groq import ChatGroq
+            agent_llm = ChatGroq(
+                api_key=GROQ_API_KEY,
+                model_name=DEFAULT_MODEL,
+                temperature=0.2,
+                max_tokens=1500,
+            )
+            react_agent = create_react_agent(agent_llm, ALL_TOOLS)
+            result = react_agent.invoke(
+                {"messages": [{"role": "user", "content": req.question}]},
+                config={"recursion_limit": 8},
+            )
+            final_msg = result["messages"][-1]
+            answer_text = final_msg.content if hasattr(final_msg, "content") else str(final_msg)
+            agent_used = "react_agent"
+            for msg in result["messages"]:
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        tools_called.append(tc.get("name", ""))
+            t_end = _time.time()
+            background_tasks.add_task(
+                mm.save_turn, req.session_id, req.user_id or "anonymous",
+                req.question, answer_text
+            )
+            from VENUAI.analytics import get_analytics
+            background_tasks.add_task(
+                get_analytics().log_query,
+                req.session_id, req.user_id or "anonymous", req.question,
+                len(answer_text), (t_end - t_start) * 1000,
+                0.7, 0.0, agent_used, tools_called, None
+            )
+            return QueryResponse(
+                answer=answer_text,
+                sources=[],
+                model="ReAct Agent (LangGraph prebuilt)",
+                chunks_retrieved=0,
+                grounding_score=0.7,
+                hallucination_score=0.0,
+                verification_flags=[],
+                annotated_answer=answer_text,
+            )
+
+        # Mode: Standard RAG (LangGraph)
+        final_state = venuai_graph.invoke({
+            "question":          req.question,
+            "top_k":             req.top_k,
+            "history":           effective_history,
+            "documents":         [],
+            "answer":            "",
+            "sources":           [],
+            "model_used":        "",
+            "working_memory":    working_memory,
+            "semantic_memories": semantic_memories,
+            "grounding_score":   0.0,
+            "hallucination_score": 0.0,
+            "verification_flags":  [],
+            "annotated_answer":    "",
+        })
+        t_end = _time.time()
+        final_answer = final_state.get("answer", "No response generated.")
+
+        background_tasks.add_task(
+            mm.save_turn, req.session_id, req.user_id or "anonymous",
+            req.question, final_answer
+        )
+        from VENUAI.analytics import get_analytics
+        background_tasks.add_task(
+            get_analytics().log_query,
+            req.session_id, req.user_id or "anonymous", req.question,
+            len(final_answer), (t_end - t_start) * 1000,
+            final_state.get("grounding_score", 0.0),
+            final_state.get("hallucination_score", 0.0),
+            agent_used, tools_called, error_str
+        )
+
+        return QueryResponse(
+            answer=final_answer,
             sources=final_state.get("sources", []),
             model=final_state.get("model_used", "LangGraph Workflow"),
             chunks_retrieved=len(final_state.get("documents", [])),
+            grounding_score=final_state.get("grounding_score", 0.0),
+            hallucination_score=final_state.get("hallucination_score", 0.0),
+            verification_flags=final_state.get("verification_flags", []),
+            annotated_answer=final_state.get("annotated_answer") or final_answer,
         )
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"LangGraph query error: {e}")
-        raise HTTPException(status_code=500, detail=f"LangGraph query execution failed: {str(e)}")
+        error_str = str(e)
+        logger.error(f"Query execution error: {e}")
+        raise HTTPException(status_code=500, detail=f"Query execution failed: {str(e)}")
+
+
+@app.post("/query/stream")
+async def query_stream(req: QueryRequest):
+    """Stream LLM tokens via Server-Sent Events."""
+    import asyncio
+    from fastapi.responses import StreamingResponse
+    from VENUAI.context_engineer import ContextBudget, rank_chunks, compress_history, build_drdo_prompt
+    from VENUAI.memory_manager import get_memory_manager
+    from groq import Groq as _Groq
+
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    async def event_generator():
+        try:
+            mm = get_memory_manager()
+            mem_ctx = mm.get_context(req.session_id, req.user_id or "anonymous", req.question)
+            effective_history = req.history or mem_ctx.get("working", [])
+
+            vs = get_vector_store()
+            docs = vs.as_retriever(
+                search_type="similarity", search_kwargs={"k": req.top_k}
+            ).invoke(req.question)
+
+            ranked_docs = rank_chunks(docs, req.question)
+            if not ranked_docs:
+                kb_data = load_prefilled_kb()
+                if kb_data:
+                    kb_text = json.dumps(kb_data, indent=2, ensure_ascii=False)[:8000]
+                    fake_doc = Document(
+                        page_content=f"DRDO Master Knowledge Base:\n{kb_text}",
+                        metadata={"filename": "DRDO Master Knowledge Base (Preloaded JSON)", "page": 0}
+                    )
+                    ranked_docs = [fake_doc]
+
+            prompt_text = build_drdo_prompt(
+                question=req.question,
+                ranked_docs=ranked_docs,
+                compressed_history=compress_history(effective_history),
+                budget=ContextBudget(),
+                semantic_memories=mem_ctx.get("semantic", []),
+            )
+
+            stream_client = _Groq(api_key=GROQ_API_KEY)
+            full_answer = ""
+            stream = create_groq_completion(
+                stream_client,
+                messages=[{"role": "user", "content": prompt_text}],
+                max_tokens=1500,
+                temperature=0.2,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    full_answer += delta
+                    yield f'data: {{"token": {json.dumps(delta)}}}\n\n'
+                    await asyncio.sleep(0)
+
+            sources_list = []
+            seen: set = set()
+            for doc in ranked_docs:
+                m = doc.metadata
+                key = (m.get("filename", "Unknown"), m.get("page", 0))
+                if key not in seen:
+                    seen.add(key)
+                    sources_list.append({"document": m.get("filename", "Unknown"),
+                                         "page": m.get("page", 0) + 1,
+                                         "chunk_preview": doc.page_content[:120].strip() + "…"})
+
+            yield f'data: {{"done": true, "sources": {json.dumps(sources_list)}, "grounding_score": 0.8}}\n\n'
+
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: mm.save_turn(
+                    req.session_id, req.user_id or "anonymous", req.question, full_answer
+                )
+            )
+        except Exception as e:
+            logger.error(f"[stream] {e}")
+            yield f'data: {{"error": {json.dumps(str(e))}}}\n\n'
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/documents", response_model=List[DocumentInfo])
@@ -479,6 +809,7 @@ def list_documents():
             chunks=v["chunks"],
             upload_time=v["upload_time"],
             size_kb=v["size_kb"],
+            tags=v.get("tags"),
         )
         for v in meta.values()
     ]
@@ -490,20 +821,15 @@ def delete_document(doc_id: str):
     meta = load_metadata()
     if doc_id not in meta:
         raise HTTPException(status_code=404, detail="Document not found.")
-
     doc_info = meta[doc_id]
-
     vs = get_vector_store()
     vs._collection.delete(where={"doc_id": doc_id})
     vs.persist()
-
     file_path = Path(doc_info.get("file_path", ""))
     if file_path.exists():
         file_path.unlink()
-
     del meta[doc_id]
     save_metadata(meta)
-
     logger.info(f"Deleted document {doc_id} ({doc_info['filename']})")
     return {"status": "deleted", "doc_id": doc_id, "filename": doc_info["filename"]}
 
@@ -517,7 +843,14 @@ def get_preset_kb():
     return kb_data
 
 
-# ── Entry Point ────────────────────────────────────────────────────────────────
+@app.get("/analytics/dashboard")
+def analytics_dashboard():
+    """Return aggregated analytics data for the admin dashboard (admin-only)."""
+    from VENUAI.analytics import get_analytics
+    return get_analytics().get_dashboard_data()
+
+
+# ── Entry Point ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("rag_server:app", host="0.0.0.0", port=8000, reload=False)

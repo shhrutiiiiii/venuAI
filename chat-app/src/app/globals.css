@@ -28,29 +28,29 @@
 }
 
 [data-theme="light"] {
-  /* Shimmery Pearl Silver & Slate Black — Light Mode */
-  --bg-main: #f4f4f5;
-  --bg-panel: #ffffff;
-  --bg-card: #ffffff;
-  --bg-card-hover: #e4e4e7;
-  --bg-input: #e4e4e7;
-  --border-subtle: #d4d4d8;
-  --border-hover: #93939e;
-  --border-focus: #18181b;
-  --text-main: #09090b;
-  --text-muted: #52525b;
-  --text-subtle: #71717a;
-  --primary-accent: #18181b;
-  --primary-gradient: linear-gradient(135deg, #18181b 0%, #3f3f46 100%);
-  --primary-hover: #27272a;
-  --btn-text: #ffffff;
-  --badge-bg: rgba(24, 24, 27, 0.08);
-  --badge-border: rgba(24, 24, 27, 0.25);
-  --badge-text: #18181b;
-  --shadow-card: 0 12px 32px -8px rgba(9, 9, 11, 0.1), 0 2px 6px -1px rgba(9, 9, 11, 0.05);
-  --scrollbar-thumb: rgba(113, 113, 122, 0.25);
-  --scrollbar-hover: rgba(24, 24, 27, 0.5);
-  --radar-grid: rgba(9, 9, 11, 0.04);
+  /* Elegant Cream & Deep Roasted Brown Theme */
+  --bg-main: #fdfbf7;        /* Soft warm cream background */
+  --bg-panel: #f7f0e6;       /* Rich warm cream panel */
+  --bg-card: #f4ebe1;        /* Silky warm cream card */
+  --bg-card-hover: #ebdcd0;  /* Toasted cream hover state */
+  --bg-input: #f8f3ec;       /* Soft cream input background */
+  --border-subtle: #e2d5c3;  /* Warm mocha tan subtle border */
+  --border-hover: #b89b7d;   /* Warm caramel brown border */
+  --border-focus: #6b4423;   /* Rich deep espresso focus border */
+  --text-main: #3b2416;      /* Deep roasted espresso text */
+  --text-muted: #6e4a31;     /* Warm cocoa brown text */
+  --text-subtle: #947156;    /* Muted warm hazelnut text */
+  --primary-accent: #6b4423;  /* Deep espresso brown accent */
+  --primary-gradient: linear-gradient(135deg, #6b4423 0%, #3b2416 100%);
+  --primary-hover: #4a2e18;
+  --btn-text: #fdfbf7;       /* Cream text on brown buttons */
+  --badge-bg: #ebdccb;
+  --badge-border: #cfae8f;
+  --badge-text: #4a2e18;
+  --shadow-card: 0 10px 25px -5px rgba(59, 36, 22, 0.09), 0 1px 3px 0 rgba(59, 36, 22, 0.05);
+  --scrollbar-thumb: #d6c2aa;
+  --scrollbar-hover: #b09374;
+  --radar-grid: rgba(59, 36, 22, 0.07);
 }
 
 @theme inline {
@@ -107,6 +107,14 @@ body {
 }
 
 .shimmer-text {
+  background: linear-gradient(110deg, #6e4a31 20%, #3b2416 50%, #6e4a31 80%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: metallicShimmer 4s linear infinite;
+}
+
+[data-theme="dark"] .shimmer-text {
   background: linear-gradient(110deg, #a1a1aa 20%, #ffffff 50%, #a1a1aa 80%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
@@ -115,7 +123,7 @@ body {
 }
 
 .genz-gradient-text {
-  background: linear-gradient(135deg, #18181b 0%, #52525b 100%);
+  background: linear-gradient(135deg, #3b2416 0%, #7c5235 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }

@@ -4,15 +4,15 @@ import { AuthProvider } from "@/contexts/AuthContext";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 
 export const metadata: Metadata = {
-  title: "VenuAI – AI-Powered Team Chat",
+  title: "DRDO VenuAI — Defence Scientific R&D Knowledge Engine",
   description:
-    "Real-time messaging, AI-assisted workflows, and seamless collaboration — all in one beautiful, fast workspace.",
-  keywords: ["chat", "AI", "collaboration", "messaging", "team", "workspace"],
-  authors: [{ name: "VenuAI" }],
+    "Official Defence Research and Development Organisation (DRDO) AI Knowledge Engine. Access lab directories, missile specs, radar platforms, and technical research documents.",
+  keywords: ["DRDO", "Defence Research", "Ministry of Defence", "VenuAI", "RAG Engine", "Agni", "Uttam Radar", "Defence AI"],
+  authors: [{ name: "DRDO VenuAI Intelligence Team" }],
   openGraph: {
-    title: "VenuAI – AI-Powered Team Chat",
+    title: "DRDO VenuAI — Defence Scientific R&D Knowledge Engine",
     description:
-      "Real-time messaging, AI-assisted workflows, and seamless collaboration.",
+      "Official Defence Research and Development Organisation (DRDO) AI Knowledge Engine.",
     type: "website",
   },
 };

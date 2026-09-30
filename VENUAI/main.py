@@ -48,8 +48,9 @@ def get_ai_response(user_input, history):
 
     messages.append({"role": "user", "content": user_input})
 
+    model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=model,
         messages=messages
     )
 
@@ -116,8 +117,9 @@ if __name__ == '__main__':
         # Process message
         history.append({"role": "user", "content": user_input})
 
+        model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=model,
             messages=history
         )
         answer = response.choices[0].message.content

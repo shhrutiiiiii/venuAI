@@ -1,0 +1,277 @@
+"""
+DRDO VenuAI — MCP Server
+==========================
+Exposes the DRDO Knowledge Base as an MCP (Model Context Protocol) server.
+Compatible with Claude Desktop, Cursor, Windsurf, and Antigravity (AGY).
+
+Transports : stdio (default)
+Run        : python VENUAI/mcp_server.py
+
+Resources:
+  drdo://documents           — list all ingested documents
+  drdo://document/{doc_id}   — fetch a specific document's content
+  drdo://kb/preset           — return the preloaded DRDO master KB JSON
+
+Tools:
+  search_drdo_knowledge_base — hybrid RAG search
+  upload_document            — ingest a PDF via file path
+  query_with_rag             — full verified RAG query
+
+Prompts:
+  drdo_research_assistant    — standard VenuAI system prompt
+"""
+
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+# Ensure VENUAI package is importable when running as a script
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+logger = logging.getLogger("drdo-rag")
+
+try:
+    from mcp.server.fastmcp import FastMCP
+except ImportError:
+    print(
+        "ERROR: 'mcp' package not installed.\n"
+        "Install with: pip install mcp\n"
+    )
+    sys.exit(1)
+
+from dotenv import load_dotenv
+load_dotenv()
+
+mcp = FastMCP("VenuAI DRDO Knowledge Base")
+
+BASE_DIR = Path(__file__).parent
+META_FILE = BASE_DIR / "doc_metadata.json"
+KB_FILE   = BASE_DIR / "data" / "drdo_knowledge_base.json"
+
+
+# ── Helper — load metadata ─────────────────────────────────────────────────────
+
+def _load_metadata() -> dict:
+    if META_FILE.exists():
+        with open(META_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+# ── Resources ───────────────────────────────────────────────────────────────────
+
+@mcp.resource("drdo://documents")
+def list_all_documents() -> str:
+    """
+    List all documents currently ingested into the DRDO knowledge base.
+    Returns a formatted Markdown table with ID, filename, pages, upload date, and tags.
+    """
+    meta = _load_metadata()
+    if not meta:
+        return "The DRDO knowledge base is empty. No documents have been uploaded."
+
+    lines = ["| ID (short) | Filename | Pages | Uploaded | Domains |",
+             "|-----------|----------|-------|----------|---------|"]
+    for doc_id, doc in meta.items():
+        tags = doc.get("tags", {})
+        domains = ", ".join(tags.get("domain_tags", []))[:30] or "N/A"
+        lines.append(
+            f"| `{doc_id[:8]}…` | {doc['filename']} | {doc['pages']} | "
+            f"{doc['upload_time'][:10]} | {domains} |"
+        )
+    return "\n".join(lines)
+
+
+@mcp.resource("drdo://document/{doc_id}")
+def get_document(doc_id: str) -> str:
+    """
+    Retrieve structured information about a specific document by its ID.
+    Returns metadata, auto-tags, and a summary of the document.
+
+    Args:
+        doc_id: The document UUID (full or first 8 characters).
+    """
+    meta = _load_metadata()
+    # Support partial ID matching (first 8 chars)
+    matched = None
+    for k, v in meta.items():
+        if k == doc_id or k.startswith(doc_id):
+            matched = v
+            break
+
+    if not matched:
+        return f"Document '{doc_id}' not found. Use drdo://documents to list available documents."
+
+    tags = matched.get("tags", {})
+    return (
+        f"**Document:** {matched['filename']}\n"
+        f"**ID:** {matched['id']}\n"
+        f"**Pages:** {matched['pages']} | **Chunks:** {matched['chunks']} | "
+        f"**Size:** {matched['size_kb']} KB\n"
+        f"**Uploaded:** {matched['upload_time'][:19]}\n\n"
+        f"**Domain Tags:** {', '.join(tags.get('domain_tags', [])) or 'N/A'}\n"
+        f"**DRDO Labs:** {', '.join(tags.get('drdo_labs', [])) or 'N/A'}\n"
+        f"**Key Entities:** {', '.join(tags.get('key_entities', [])) or 'N/A'}\n"
+        f"**Classification:** {tags.get('classification_level', 'UNKNOWN')}\n\n"
+        f"**Auto-Summary:**\n{tags.get('summary', 'Not available.')}"
+    )
+
+
+@mcp.resource("drdo://kb/preset")
+def get_preset_kb() -> str:
+    """
+    Return the preloaded DRDO Master Knowledge Base JSON.
+    Contains information about all DRDO clusters, laboratories, and major weapons platforms.
+    """
+    if not KB_FILE.exists():
+        return "Preloaded DRDO knowledge base file not found."
+    with open(KB_FILE, encoding="utf-8") as f:
+        data = json.load(f)
+    return json.dumps(data, indent=2, ensure_ascii=False)
+
+
+# ── Tools ────────────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def search_drdo_knowledge_base(query: str, top_k: int = 5) -> str:
+    """
+    Search the DRDO knowledge base using hybrid semantic + keyword retrieval.
+    Returns relevant document chunks with source citations.
+
+    Args:
+        query : The search query about DRDO labs, weapons, specs, or research.
+        top_k : Number of results to return (default 5).
+    """
+    try:
+        from VENUAI.agent_tools import drdo_kb_search
+        return drdo_kb_search.invoke({"query": query, "top_k": top_k})
+    except Exception as e:
+        return f"Search failed: {str(e)}"
+
+
+@mcp.tool()
+def upload_document(file_path: str) -> str:
+    """
+    Ingest a PDF document into the DRDO knowledge base.
+    Provide the absolute file path to the PDF.
+
+    Args:
+        file_path: Absolute path to a PDF file on the server's filesystem.
+    """
+    import urllib.request
+    import urllib.error
+
+    path = Path(file_path)
+    if not path.exists():
+        return f"File not found: {file_path}"
+    if not path.suffix.lower() == ".pdf":
+        return "Only PDF files are supported."
+
+    try:
+        import urllib.request
+        with open(path, "rb") as f:
+            data = f.read()
+
+        boundary = "VenuAIMCPBoundary"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
+            f"Content-Type: application/pdf\r\n\r\n"
+        ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+
+        req = urllib.request.Request(
+            "http://127.0.0.1:8000/upload",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read().decode())
+        return (
+            f"✅ Document uploaded successfully!\n"
+            f"**Filename:** {result['filename']}\n"
+            f"**Pages:** {result['pages']} | **Chunks:** {result['chunks']}"
+        )
+    except Exception as e:
+        return f"Upload failed: {str(e)}"
+
+
+@mcp.tool()
+def query_with_rag(question: str, session_id: str = "") -> str:
+    """
+    Run a full VenuAI RAG query: retrieve → verify → hallucination check.
+    Returns a grounded, verified answer with confidence score.
+
+    Args:
+        question   : The DRDO research question to answer.
+        session_id : Optional session ID for memory context.
+    """
+    import urllib.request
+
+    payload = json.dumps({
+        "question": question,
+        "top_k": 4,
+        "session_id": session_id or "mcp-session",
+    }).encode()
+
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:8000/query",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode())
+
+        answer = data.get("answer", "No response generated.")
+        grounding = data.get("grounding_score", 0)
+        hall_score = data.get("hallucination_score", 0)
+        sources = data.get("sources", [])
+
+        sources_md = "\n".join(
+            f"- {s['document']}, p.{s['page']}" for s in sources[:5]
+        )
+
+        return (
+            f"{answer}\n\n"
+            f"---\n"
+            f"📊 **Confidence:** Grounding={grounding:.2f} | Hallucination={hall_score:.2f}\n"
+            f"📚 **Sources:**\n{sources_md or 'Preloaded knowledge base.'}"
+        )
+    except Exception as e:
+        return f"RAG query failed: {str(e)}\n\nEnsure rag_server.py is running on port 8000."
+
+
+# ── Prompts ──────────────────────────────────────────────────────────────────────
+
+@mcp.prompt()
+def drdo_research_assistant() -> str:
+    """
+    Standard VenuAI system prompt for DRDO research assistance.
+    Use this as the system instruction when interacting with the VenuAI knowledge base.
+    """
+    return (
+        "You are VenuAI, an intelligent scientific research assistant for DRDO "
+        "(Defence Research and Development Organisation), India's premier defence R&D agency.\n\n"
+        "You help DRDO scientists, engineers, and researchers with:\n"
+        "- Technical specifications of weapon systems and platforms\n"
+        "- Information about DRDO laboratories, clusters, and their mandates\n"
+        "- R&D programme status, project timelines, and research outcomes\n"
+        "- Materials science, propulsion, electronics, and systems engineering queries\n\n"
+        "Always:\n"
+        "1. Use the search_drdo_knowledge_base tool to retrieve relevant information\n"
+        "2. Present data in Markdown tables and bullet points\n"
+        "3. Bold key lab codes, weapon names, and technical parameters\n"
+        "4. Cite sources with document name and page number\n"
+        "5. State clearly if information is not available in the knowledge base"
+    )
+
+
+# ── Entry point ──────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    logger.info("Starting VenuAI MCP Server (stdio transport)…")
+    mcp.run()

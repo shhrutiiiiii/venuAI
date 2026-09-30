@@ -18,8 +18,8 @@ export default function ThemeToggle({ className = "", showLabel = false }: Theme
       onClick={toggleTheme}
       className={`relative inline-flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all duration-300 shadow-sm ${
         theme === "dark"
-          ? "bg-slate-900/80 border-slate-700/80 text-amber-300 hover:bg-slate-800 hover:border-slate-600"
-          : "bg-white/90 border-slate-200 text-amber-600 hover:bg-slate-100 hover:border-slate-300"
+          ? "bg-slate-900/80 border-slate-700/80 text-cyan-300 hover:bg-slate-800 hover:border-slate-600"
+          : "bg-white/90 border-slate-200 text-sky-600 hover:bg-slate-100 hover:border-slate-300"
       } ${className}`}
       aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
       title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}

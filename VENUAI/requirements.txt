@@ -5,6 +5,8 @@ uvicorn[standard]
 langchain
 langchain-community
 langchain-groq
+langchain-core
+langgraph
 chromadb
 sentence-transformers
 pypdf
@@ -13,3 +15,9 @@ pyttsx3
 SpeechRecognition
 pyaudio
 pythoncom
+scikit-learn
+numpy
+mcp
+duckduckgo-search
+httpx
+aiofiles

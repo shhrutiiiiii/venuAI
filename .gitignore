@@ -24,3 +24,5 @@ next-env.d.ts
 # OS & Logs
 .DS_Store
 *.log
+*.db
+*.sqlite3

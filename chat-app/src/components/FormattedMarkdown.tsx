@@ -17,8 +17,15 @@ export default function FormattedMarkdown({ content, className = "" }: Formatted
     setTimeout(() => setCopiedIndex(null), 2000);
   };
 
+  const safeContent =
+    typeof content === "string"
+      ? content
+      : typeof content === "object"
+      ? JSON.stringify(content, null, 2)
+      : String(content || "");
+
   // Clean any weird character artifacts from model output
-  const cleanedContent = content.replace(/\?\?/g, "—");
+  const cleanedContent = safeContent.replace(/\?\?/g, "—");
 
   // Split content into blocks (code blocks, tables, lists, paragraphs, headers)
   const blocks = parseMarkdownBlocks(cleanedContent);
