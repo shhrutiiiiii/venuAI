@@ -121,6 +121,24 @@ class MemoryManager:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_user ON turns(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id)")
+            # Tier 4 — Research Memory: findings produced by DeepResearchAgent
+            # (VENUAI/agents/deep_research_agent.py), keyed by a research_id so
+            # a long-running research task's results can be retrieved later.
+            # Same SQLite file as episodic memory above — not a new store.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_findings (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    research_id     TEXT NOT NULL,
+                    user_id         TEXT NOT NULL,
+                    question        TEXT NOT NULL,
+                    answer          TEXT NOT NULL,
+                    evidence_coverage REAL NOT NULL DEFAULT 0.0,
+                    critique_passed INTEGER NOT NULL DEFAULT 0,
+                    timestamp       TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_research_user ON research_findings(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_research_id ON research_findings(research_id)")
             conn.commit()
 
     # ── Lazy ChromaDB accessor ────────────────────────────────────────────────
@@ -369,6 +387,50 @@ class MemoryManager:
                 (["armaments"] if any(l in top_labs for l in ["ARDE", "HEMRL"]) else [])
             )),
         }
+
+    # ── Tier 4: Research Memory ───────────────────────────────────────────────
+
+    def save_research_finding(
+        self,
+        research_id: str,
+        user_id: str,
+        question: str,
+        answer: str,
+        evidence_coverage: float = 0.0,
+        critique_passed: bool = False,
+    ) -> None:
+        """Persist one DeepResearchAgent result, keyed by research_id so a
+        long-running research task's findings can be retrieved later."""
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute(
+                    "INSERT INTO research_findings "
+                    "(research_id, user_id, question, answer, evidence_coverage, critique_passed, timestamp) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (research_id, user_id, question, answer, evidence_coverage,
+                     int(critique_passed), datetime.now().isoformat()),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"[MemoryManager] save_research_finding failed: {e}")
+
+    def get_research_findings(self, research_id: str, user_id: str) -> List[dict]:
+        """
+        Retrieve findings for one research_id — scoped to user_id so one
+        user cannot read another user's research findings by guessing an id.
+        """
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM research_findings WHERE research_id = ? AND user_id = ? "
+                    "ORDER BY id ASC",
+                    (research_id, user_id),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"[MemoryManager] get_research_findings failed: {e}")
+            return []
 
     # ── Private helpers ───────────────────────────────────────────────────────
 

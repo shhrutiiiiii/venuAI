@@ -67,16 +67,17 @@ class OrchestratorAgent:
         """
         valid_domains = {"technical", "labs", "research", "general"}
         try:
-            model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
-            resp = self.groq_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "user", "content": _INTENT_PROMPT.format(question=question)}
-                ],
+            from VENUAI.ai_gateway.gateway import get_gateway
+            from VENUAI.ai_gateway.model_router import TaskType
+
+            gateway = get_gateway(self.groq_client)
+            result = gateway.complete(
+                task_type=TaskType.FAST_CLASSIFICATION,
+                messages=[{"role": "user", "content": _INTENT_PROMPT.format(question=question)}],
                 max_tokens=20,
                 temperature=0.0,
             )
-            raw = resp.choices[0].message.content.strip().lower()
+            raw = result.content.strip().lower()
             domains = [d.strip() for d in raw.split(",") if d.strip() in valid_domains]
             if not domains:
                 domains = ["general"]
@@ -93,6 +94,7 @@ class OrchestratorAgent:
         question: str,
         history: Optional[List[dict]] = None,
         memory_ctx: Optional[dict] = None,
+        allowed_doc_ids: Optional[List[str]] = None,
     ) -> AgentResult:
         """
         Route the query to specialist agent(s):
@@ -100,9 +102,12 @@ class OrchestratorAgent:
           - Multiple domains → call specialists in parallel, then merge results.
 
         Args:
-            question   : The user's question.
-            history    : Prior conversation turns.
-            memory_ctx : Memory context dict from MemoryManager.get_context().
+            question        : The user's question.
+            history         : Prior conversation turns.
+            memory_ctx      : Memory context dict from MemoryManager.get_context().
+            allowed_doc_ids : doc_ids the caller is authorized to retrieve from —
+                               forwarded to every specialist's retrieval call.
+                               See Documents/Backend/authentication.md.
 
         Returns:
             A single consolidated AgentResult.
@@ -114,7 +119,7 @@ class OrchestratorAgent:
             logger.info(f"[OrchestratorAgent] Routing to {agent.name}")
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
-                None, lambda: agent.query(question, history)
+                None, lambda: agent.query(question, history, allowed_doc_ids)
             )
             return result
 
@@ -123,7 +128,7 @@ class OrchestratorAgent:
         tasks = [
             asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda a=self._specialists.get(d, self._specialists["general"]): a.query(question, history)
+                lambda a=self._specialists.get(d, self._specialists["general"]): a.query(question, history, allowed_doc_ids)
             )
             for d in domains
         ]
@@ -131,7 +136,10 @@ class OrchestratorAgent:
         valid_results = [r for r in results if isinstance(r, AgentResult)]
 
         if not valid_results:
-            return self._specialists["general"].query(question, history)
+            # Previously omitted allowed_doc_ids here — a real authorization
+            # gap on this specific fallback path (all specialists erroring
+            # out). Fixed to match every other call site in this method.
+            return self._specialists["general"].query(question, history, allowed_doc_ids)
 
         if len(valid_results) == 1:
             return valid_results[0]
@@ -155,9 +163,11 @@ class OrchestratorAgent:
         # Combine specialist answers into a synthesis prompt
         parts = []
         all_sources = []
+        all_documents = []
         for r in results:
             parts.append(f"=== {r.agent_name} ===\n{r.answer}")
             all_sources.extend(r.sources)
+            all_documents.extend(r.documents)
 
         combined = "\n\n".join(parts)
         prompt = (
@@ -170,14 +180,17 @@ class OrchestratorAgent:
         )
 
         try:
-            model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
-            resp = self.groq_client.chat.completions.create(
-                model=model,
+            from VENUAI.ai_gateway.gateway import get_gateway
+            from VENUAI.ai_gateway.model_router import TaskType
+
+            gateway = get_gateway(self.groq_client)
+            result = gateway.complete(
+                task_type=TaskType.SYNTHESIS,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=1500,
                 temperature=0.1,
             )
-            merged_answer = resp.choices[0].message.content
+            merged_answer = result.content
         except Exception as e:
             logger.error(f"[OrchestratorAgent] merge_results LLM failed: {e}")
             # Fallback: concatenate answers
@@ -192,4 +205,5 @@ class OrchestratorAgent:
             sources=all_sources,
             confidence=round(avg_confidence, 2),
             reasoning=f"Multi-domain query handled by {agent_names}.",
+            documents=all_documents,
         )

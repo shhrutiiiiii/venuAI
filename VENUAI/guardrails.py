@@ -141,6 +141,37 @@ class GuardrailEngine:
         except Exception as e:
             logger.warning(f"[GuardrailEngine] DB init warning: {e}")
 
+    def get_recent_violations(self, user_ids: Optional[List[str]] = None, limit: int = 100) -> List[dict]:
+        """
+        Read-side of the audit log — backs GET /security/violations (Phase 4
+        Security Center, see Documents/Backend/multi-tenancy.md). When
+        `user_ids` is given, only rows whose user_id is in that list are
+        returned — this is how the Security Center stays tenant-scoped even
+        though guardrail_logs itself has no tenant_id column (it only ever
+        recorded user_id, so the tenant filter happens via a join at the
+        caller, not inside this table).
+        """
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                if user_ids is not None:
+                    if not user_ids:
+                        return []
+                    placeholders = ",".join("?" for _ in user_ids)
+                    rows = conn.execute(
+                        f"SELECT * FROM guardrail_logs WHERE user_id IN ({placeholders}) "
+                        "ORDER BY id DESC LIMIT ?",
+                        list(user_ids) + [limit],
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM guardrail_logs ORDER BY id DESC LIMIT ?", (limit,),
+                    ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"[GuardrailEngine] Failed to read audit log: {e}")
+            return []
+
     def log_violation(self, user_id: str, query: str, violation_type: str, action: str, msg: str):
         """Audit log a guardrail violation."""
         try:
@@ -220,6 +251,17 @@ def get_guardrail_engine() -> GuardrailEngine:
     if _guardrail_engine_instance is None:
         _guardrail_engine_instance = GuardrailEngine()
     return _guardrail_engine_instance
+
+
+def reset_guardrail_engine_singleton() -> None:
+    """Test-only hook — same rationale as VENUAI.ai_gateway.gateway.reset_gateway_singleton.
+    GuardrailEngine._init_db() only ever runs once, at singleton
+    construction; a test that monkeypatches DB_PATH to a fresh tmp_path
+    without also resetting this singleton would get a silently-dropped
+    INSERT (table doesn't exist at the new path) rather than a real audit
+    write — see VENUAI/tests/conftest.py's _isolated_guardrail_audit_db."""
+    global _guardrail_engine_instance
+    _guardrail_engine_instance = None
 
 
 if __name__ == "__main__":

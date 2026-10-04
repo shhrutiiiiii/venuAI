@@ -5,6 +5,7 @@ Abstract base class and shared data structures for all specialist agents
 in the multi-agent system.
 """
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -32,6 +33,13 @@ class AgentResult:
     sources: List[QuerySource] = field(default_factory=list)
     confidence: float = 0.0     # 0.0 → 1.0 (grounding score from VerifierAgent)
     reasoning: str = ""         # brief note on why this agent was chosen / what it did
+    # Phase 5 — Evidence Explorer integration for multi-agent mode
+    # (VENUAI/evidence_store.py). The real retrieved Document objects
+    # (text chunks + any folded-in multimodal regions), not just their
+    # QuerySource summaries — VerificationPipeline needs the full
+    # page_content to build real Evidence/Claim objects from, which
+    # QuerySource's truncated chunk_preview can't provide.
+    documents: List[Document] = field(default_factory=list)
 
 
 # ── BaseSpecialistAgent ─────────────────────────────────────────────────────────
@@ -65,7 +73,12 @@ class BaseSpecialistAgent:
 
     # ── Core query method ─────────────────────────────────────────────────────
 
-    def query(self, question: str, history: Optional[List[dict]] = None) -> AgentResult:
+    def query(
+        self,
+        question: str,
+        history: Optional[List[dict]] = None,
+        allowed_doc_ids: Optional[List[str]] = None,
+    ) -> AgentResult:
         """
         Execute a RAG query for this agent's domain.
 
@@ -76,8 +89,11 @@ class BaseSpecialistAgent:
           4. Return AgentResult.
 
         Args:
-            question : The user's question.
-            history  : Optional list of prior conversation turns.
+            question        : The user's question.
+            history         : Optional list of prior conversation turns.
+            allowed_doc_ids : doc_ids the caller is authorized to retrieve from
+                               (None = unrestricted/admin; [] = none visible).
+                               See Documents/Backend/authentication.md.
 
         Returns:
             AgentResult with answer, sources, and confidence estimate.
@@ -85,11 +101,22 @@ class BaseSpecialistAgent:
         from VENUAI.rag_server import get_vector_store  # local import to avoid circular deps
 
         vs = get_vector_store()
+
+        where_clauses = []
+        if self.metadata_filter:
+            where_clauses.append(self.metadata_filter)
+        if allowed_doc_ids is not None:
+            where_clauses.append({"doc_id": {"$in": allowed_doc_ids or ["__none__"]}})
+        where_filter = (
+            {"$and": where_clauses} if len(where_clauses) > 1
+            else (where_clauses[0] if where_clauses else None)
+        )
+
         retriever = vs.as_retriever(
             search_type="similarity",
             search_kwargs={
                 "k": self.top_k,
-                **({"filter": self.metadata_filter} if self.metadata_filter else {}),
+                **({"filter": where_filter} if where_filter else {}),
             },
         )
         try:
@@ -97,6 +124,20 @@ class BaseSpecialistAgent:
         except Exception as e:
             logger.warning(f"[{self.name}] Retrieval error: {e}")
             docs = []
+
+        # Phase 5: fold in table/image region hits, same as the standard
+        # RAG, Agentic RAG, and ReAct paths. Not filtered by
+        # self.metadata_filter (a multimodal region carries no domain_tags
+        # metadata to filter on) — only by allowed_doc_ids, the
+        # authorization boundary every retrieval path shares. Best-effort:
+        # a lexical-search failure here must not break the text-chunk result.
+        try:
+            from VENUAI.multimodal_retrieval import retrieve_multimodal_documents
+            region_docs = retrieve_multimodal_documents(question, allowed_doc_ids, top_k=3)
+            if region_docs:
+                docs = list(docs) + region_docs
+        except Exception as region_err:
+            logger.warning(f"[{self.name}] multimodal region retrieval skipped: {region_err}")
 
         if not docs:
             from VENUAI.rag_server import load_prefilled_kb
@@ -130,23 +171,17 @@ class BaseSpecialistAgent:
         )
 
         try:
-            candidate_models = [os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"), "qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]
-            resp = None
-            last_err = None
-            for m in candidate_models:
-                try:
-                    resp = self.groq_client.chat.completions.create(
-                        model=m,
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=1200,
-                        temperature=0.2,
-                    )
-                    break
-                except Exception as ex:
-                    last_err = ex
-            if resp is None and last_err:
-                raise last_err
-            answer = resp.choices[0].message.content
+            from VENUAI.ai_gateway.gateway import get_gateway
+            from VENUAI.ai_gateway.model_router import TaskType
+
+            gateway = get_gateway(self.groq_client)
+            result = gateway.complete(
+                task_type=TaskType.GENERATION,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1200,
+                temperature=0.2,
+            )
+            answer = result.content
         except Exception as e:
             logger.error(f"[{self.name}] LLM call failed: {e}")
             answer = f"⚠️ {self.name} encountered an error: {str(e)}"
@@ -173,4 +208,5 @@ class BaseSpecialistAgent:
             sources=sources,
             confidence=round(confidence, 2),
             reasoning=f"{self.name} handled this query (domain: {self.domain}).",
+            documents=docs,
         )

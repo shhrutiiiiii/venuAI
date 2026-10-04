@@ -4,8 +4,18 @@ DRDO VenuAI — MCP Server
 Exposes the DRDO Knowledge Base as an MCP (Model Context Protocol) server.
 Compatible with Claude Desktop, Cursor, Windsurf, and Antigravity (AGY).
 
-Transports : stdio (default)
-Run        : python VENUAI/mcp_server.py
+Transports:
+  stdio            (default) — local-process only, no network, no auth needed
+                     (the "caller" is whoever started this process locally).
+  streamable-http  — real network transport for an actually-deployed MCP
+                     server (Phase 5). Requires MCP_API_KEY to be set — the
+                     server refuses to start in this mode without it (see
+                     Documents/AI/mcp-deployment.md "Security
+                     Considerations"). Bearer-token checked via constant-
+                     time comparison in VenuAIBearerAuthMiddleware below.
+
+Run        : python VENUAI/mcp_server.py                 (stdio)
+             MCP_TRANSPORT=http python VENUAI/mcp_server.py  (streamable-http)
 
 Resources:
   drdo://documents           — list all ingested documents
@@ -19,8 +29,20 @@ Tools:
 
 Prompts:
   drdo_research_assistant    — standard VenuAI system prompt
+
+Known limitation (see Documents/Backend/authentication.md): the tools
+above use VENUAI.agent_tools' unbound, module-level functions (no
+per-caller identity to filter by — there is exactly one "caller" per
+process/connection here, same as any other MCP server). If this server
+is ever extended to serve multiple distinct end users over one shared
+HTTP deployment, it needs the same per-request identity binding
+`agent_tools.build_agent_tools()` already does for the ReAct HTTP path —
+not built here, since today's only real transport story is "one trusted
+caller per connection" (a local stdio client, or one bearer-token-holding
+HTTP client).
 """
 
+import hmac
 import json
 import logging
 import os
@@ -33,18 +55,20 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 logger = logging.getLogger("drdo-rag")
 
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 except ImportError:
     print(
-        "ERROR: 'mcp' package not installed.\n"
+        "ERROR: 'mcp' package not installed or incompatible version.\n"
         "Install with: pip install mcp\n"
+        "(This module targets the mcp>=2.0 MCPServer API — mcp 1.x's FastMCP "
+        "was renamed; see https://py.sdk.modelcontextprotocol.io/v2/migration/)\n"
     )
     sys.exit(1)
 
 from dotenv import load_dotenv
 load_dotenv()
 
-mcp = FastMCP("VenuAI DRDO Knowledge Base")
+mcp = MCPServer("VenuAI DRDO Knowledge Base")
 
 BASE_DIR = Path(__file__).parent
 META_FILE = BASE_DIR / "doc_metadata.json"
@@ -270,8 +294,74 @@ def drdo_research_assistant() -> str:
     )
 
 
+# ── HTTP transport auth (Phase 5) ────────────────────────────────────────────
+# A deliberately simple shared-secret bearer check — not the mcp SDK's full
+# OAuth-resource-server machinery (AuthSettings/token_verifier), which is
+# built for a multi-client authorization-server flow this single-operator
+# deployment doesn't have. One static, operator-provisioned API key is the
+# right-sized real security mechanism here, the same way a plain API key
+# secures countless internal services — see
+# Documents/AI/mcp-deployment.md Design Principles.
+
+class VenuAIBearerAuthMiddleware:
+    """ASGI middleware: every HTTP request must carry
+    `Authorization: Bearer <MCP_API_KEY>`, checked with `hmac.compare_digest`
+    (constant-time — a naive `==` would leak the key's length/prefix via
+    timing). Wraps the MCP server's own Starlette app, so this applies to
+    every MCP endpoint without touching the SDK's internal routing."""
+
+    def __init__(self, app, api_key: str):
+        self.app = app
+        self._api_key = api_key
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        auth_header = headers.get(b"authorization", b"").decode("latin-1")
+        token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
+
+        if not token or not hmac.compare_digest(token, self._api_key):
+            response_body = json.dumps({"error": "Unauthorized — missing or invalid bearer token."}).encode()
+            await send({
+                "type": "http.response.start", "status": 401,
+                "headers": [(b"content-type", b"application/json")],
+            })
+            await send({"type": "http.response.body", "body": response_body})
+            return
+
+        await self.app(scope, receive, send)
+
+
+def build_http_app():
+    """
+    Builds the real network-reachable ASGI app for `MCP_TRANSPORT=http`.
+    Refuses to build (raises, never silently falls back to unauthenticated)
+    if MCP_API_KEY isn't set — an HTTP-reachable MCP server with no auth
+    at all would be a real, serious exposure, not a reasonable default.
+    """
+    api_key = os.getenv("MCP_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "MCP_TRANSPORT=http requires MCP_API_KEY to be set — refusing to start an "
+            "unauthenticated, network-reachable MCP server. Generate one with: "
+            "python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        )
+    app = mcp.streamable_http_app()
+    return VenuAIBearerAuthMiddleware(app, api_key)
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    logger.info("Starting VenuAI MCP Server (stdio transport)…")
-    mcp.run()
+    transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
+
+    if transport == "http":
+        import uvicorn
+        logger.info("Starting VenuAI MCP Server (streamable-http transport, bearer-auth required)…")
+        uvicorn.run(build_http_app(), host="127.0.0.1", port=int(os.getenv("MCP_PORT", "8765")))
+    else:
+        logger.info("Starting VenuAI MCP Server (stdio transport)…")
+        mcp.run()

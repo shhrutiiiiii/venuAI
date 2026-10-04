@@ -128,6 +128,53 @@ def context_recall(
     return round(hits / len(relevant_doc_ids), 3)
 
 
+def mean_reciprocal_rank(retrieved_doc_ids: List[str], relevant_doc_ids: List[str]) -> float:
+    """
+    MRR for a single query — reciprocal of the rank of the first relevant
+    document in the retrieved list. Unlike context_precision/context_recall
+    above (which only check set membership, not order), this rewards
+    ranking a relevant document earlier.
+
+    Returns:
+        float in [0.0, 1.0]. 0.0 if no relevant document was retrieved at all.
+    """
+    if not relevant_doc_ids or not retrieved_doc_ids:
+        return 0.0
+    relevant_set = set(relevant_doc_ids)
+    for rank, doc_id in enumerate(retrieved_doc_ids, start=1):
+        if doc_id in relevant_set:
+            return round(1.0 / rank, 3)
+    return 0.0
+
+
+def ndcg_at_k(retrieved_doc_ids: List[str], relevant_doc_ids: List[str], k: Optional[int] = None) -> float:
+    """
+    Normalized Discounted Cumulative Gain at rank k, with binary relevance
+    (a doc is relevant or not — no graded relevance scores exist in this
+    dataset format today).
+
+    Returns:
+        float in [0.0, 1.0]. 1.0 = all relevant docs retrieved at the top ranks.
+    """
+    if not relevant_doc_ids or not retrieved_doc_ids:
+        return 0.0
+    import math
+
+    k = k or len(retrieved_doc_ids)
+    relevant_set = set(relevant_doc_ids)
+    retrieved = retrieved_doc_ids[:k]
+
+    dcg = sum(
+        (1.0 / math.log2(rank + 1)) for rank, doc_id in enumerate(retrieved, start=1)
+        if doc_id in relevant_set
+    )
+    ideal_hits = min(len(relevant_set), k)
+    idcg = sum(1.0 / math.log2(rank + 1) for rank in range(1, ideal_hits + 1))
+    if idcg == 0:
+        return 0.0
+    return round(dcg / idcg, 3)
+
+
 def hallucination_rate(claims) -> float:
     """
     Compute the fraction of claims flagged as UNSUPPORTED.

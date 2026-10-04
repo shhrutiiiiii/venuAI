@@ -1,23 +1,52 @@
-groq
-python-dotenv
-fastapi
-uvicorn[standard]
-langchain
-langchain-community
-langchain-groq
-langchain-core
-langgraph
-chromadb
-sentence-transformers
-pypdf
-python-multipart
-pyttsx3
-SpeechRecognition
-pyaudio
-pythoncom
-scikit-learn
-numpy
-mcp
-duckduckgo-search
-httpx
-aiofiles
+groq>=0.11.0
+python-dotenv>=1.0.1
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+langchain>=0.3.0
+langchain-community>=0.3.0
+langchain-groq>=0.2.0
+langchain-core>=0.3.0
+langchain-text-splitters>=0.3.0
+langgraph>=0.2.0
+chromadb>=0.5.0
+sentence-transformers>=3.2.0
+pypdf>=5.0.0
+python-multipart>=0.0.12
+pyttsx3>=2.90
+SpeechRecognition>=3.10.4
+pyaudio>=0.2.14
+pywin32>=306; sys_platform == 'win32'  # provides pythoncom, used by main.py's voice prototype
+scikit-learn>=1.5.0
+numpy>=1.26.0
+pandas>=2.2.0  # VENUAI/agents/data_analyst_agent.py — deterministic tabular analysis
+openpyxl>=3.1.0  # pandas XLSX read/write support — VENUAI/dataset_security.py
+
+# Knowledge Graph (VENUAI/knowledge_graph/) — psycopg2 is only exercised
+# when KNOWLEDGE_GRAPH_BACKEND=postgres is set; SqliteGraphStore (the
+# default) needs no extra dependency beyond the stdlib.
+psycopg2-binary>=2.9.0
+
+# Multimodal document ingestion (VENUAI/multimodal_ingestion.py)
+pymupdf>=1.24.0     # page layout + embedded image extraction (fitz)
+pdfplumber>=0.11.0  # table detection/extraction
+pytesseract>=0.3.10 # OCR wrapper — requires the Tesseract binary separately
+                    # installed on the host; see VENUAI/ocr_provider.py and
+                    # Documents/AI/vision.md for the honest unavailable-path behavior.
+Pillow>=10.0.0
+mcp>=2.0.0  # mcp.server.mcpserver.MCPServer (mcp 1.x's FastMCP was renamed) — see Documents/AI/mcp-deployment.md
+duckduckgo-search>=6.3.0
+httpx>=0.27.0
+aiofiles>=24.1.0
+
+# Authentication & security (added to replace mock auth — see
+# Documents/Backend/authentication.md)
+pyjwt>=2.9.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.2.0
+slowapi>=0.1.9
+email-validator>=2.2.0
+
+# Testing
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+httpx>=0.27.0

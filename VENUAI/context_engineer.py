@@ -13,10 +13,19 @@ Responsibilities:
 import math
 import re
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from langchain_core.documents import Document
+
+# Epoch-safe sentinel for "no upload_time metadata" — datetime.min.timestamp()
+# raises OSError ([Errno 22] Invalid argument) on Windows because year-1 dates
+# are outside the platform's representable range. This bit real chunk
+# retrieval: /upload only attaches upload_time to the doc_metadata.json entry,
+# never to individual chunk metadata in Chroma, so every real retrieved chunk
+# hit this fallback. See VENUAI/tests/test_agent_tools_authorization.py and
+# VENUAI/tests/test_context_engineer.py.
+_EPOCH_FALLBACK = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 logger = logging.getLogger("drdo-rag")
 
@@ -120,11 +129,12 @@ def _parse_upload_time(meta: dict) -> datetime:
     """Safely parse upload_time from document metadata."""
     raw = meta.get("upload_time", "")
     if not raw:
-        return datetime.min
+        return _EPOCH_FALLBACK
     try:
-        return datetime.fromisoformat(raw)
+        parsed = datetime.fromisoformat(raw)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
-        return datetime.min
+        return _EPOCH_FALLBACK
 
 
 def rank_chunks(docs: List[Document], query: str) -> List[Document]:
