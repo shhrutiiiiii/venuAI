@@ -3,6 +3,7 @@
 .env*.local
 *.env
 .venv/
+explanation.md
 
 # Python
 venv/
