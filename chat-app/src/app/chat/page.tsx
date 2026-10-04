@@ -42,6 +42,7 @@ import {
   Atom,
   Radar,
   Crosshair,
+  BarChart3,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -50,18 +51,25 @@ import { ConfidenceBadge } from "@/components/ConfidenceBadge";
 import { VerificationPanel } from "@/components/VerificationPanel";
 import { AgentModeToggle, AgentMode } from "@/components/AgentModeToggle";
 import { StreamingMessage } from "@/components/StreamingMessage";
+import DataAnalystWorkspace from "@/components/DataAnalystWorkspace";
 
 // ─── Error Formatting Helper ──────────────────────────────────────────────────
 
-function extractErrorMessage(data: any, fallback: string = "An error occurred."): string {
+type ApiErrorItem = { msg?: string; message?: string; loc?: string[] } | string;
+type ApiErrorValue = string | ApiErrorItem[] | { msg?: string; message?: string };
+
+function extractErrorMessage(data: unknown, fallback: string = "An error occurred."): string {
   if (!data) return fallback;
   if (typeof data === "string") return data;
-  if (typeof data.error === "string") return data.error;
-  if (typeof data.detail === "string") return data.detail;
+  if (typeof data !== "object") return fallback;
 
-  if (Array.isArray(data.detail)) {
-    return data.detail
-      .map((item: any) => {
+  const obj = data as { error?: ApiErrorValue; detail?: ApiErrorValue };
+  if (typeof obj.error === "string") return obj.error;
+  if (typeof obj.detail === "string") return obj.detail;
+
+  if (Array.isArray(obj.detail)) {
+    return obj.detail
+      .map((item) => {
         if (typeof item === "string") return item;
         if (item && typeof item === "object") {
           const loc = Array.isArray(item.loc) ? item.loc.join(".") : "";
@@ -73,18 +81,18 @@ function extractErrorMessage(data: any, fallback: string = "An error occurred.")
       .join("; ");
   }
 
-  if (Array.isArray(data.error)) {
-    return data.error
-      .map((item: any) => (typeof item === "string" ? item : (item?.msg || JSON.stringify(item))))
+  if (Array.isArray(obj.error)) {
+    return obj.error
+      .map((item) => (typeof item === "string" ? item : (item?.msg || JSON.stringify(item))))
       .join("; ");
   }
 
-  if (data.detail && typeof data.detail === "object") {
-    return data.detail.msg || data.detail.message || JSON.stringify(data.detail);
+  if (obj.detail && typeof obj.detail === "object") {
+    return obj.detail.msg || obj.detail.message || JSON.stringify(obj.detail);
   }
 
-  if (data.error && typeof data.error === "object") {
-    return data.error.msg || data.error.message || JSON.stringify(data.error);
+  if (obj.error && typeof obj.error === "object") {
+    return obj.error.msg || obj.error.message || JSON.stringify(obj.error);
   }
 
   return fallback;
@@ -239,7 +247,7 @@ export default function ChatPage() {
   const router = useRouter();
 
   // Mode: "ai_agent" | "team_chat" | "drdo_rag"
-  const [workspaceMode, setWorkspaceMode] = useState<"ai_agent" | "team_chat" | "drdo_rag">("drdo_rag");
+  const [workspaceMode, setWorkspaceMode] = useState<"ai_agent" | "team_chat" | "drdo_rag" | "data_analyst">("drdo_rag");
 
   // AI Agent States
   const [selectedModel, setSelectedModel] = useState("venu-pro");
@@ -276,39 +284,10 @@ export default function ChatPage() {
 
   const [mounted, setMounted] = useState(false);
 
-  useEffect(() => {
-    setMounted(true);
-    checkRagServerHealth();
-    const interval = setInterval(checkRagServerHealth, 15000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Route protection
-  useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
-      router.replace("/login");
-    }
-  }, [isLoading, isAuthenticated, router]);
-
-  // Load RAG documents when switching to RAG mode
-  useEffect(() => {
-    if (workspaceMode === "drdo_rag") {
-      fetchRagDocuments();
-    }
-  }, [workspaceMode]);
-
-  // Auto-scroll RAG messages
-  useEffect(() => {
-    ragMessagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [ragMessages, ragLoading]);
-
-  const handleLogout = () => {
-    logout();
-    router.push("/login");
-  };
-
-  // ── DRDO RAG Handlers ────────────────────────────────────────────────────
-
+  // Declared above the effects that reference them — `const` bindings are
+  // not hoisted, so even though effects only run after the full render
+  // (making the original call-before-declare order runtime-safe), this
+  // ordering is the honest, lint-clean version of the same behavior.
   const checkRagServerHealth = async () => {
     try {
       const res = await fetch("/api/rag/health");
@@ -336,6 +315,46 @@ export default function ChatPage() {
       setRagServerStatus("offline");
     }
   };
+
+  useEffect(() => {
+    // Standard "mark as mounted" flag for hydration-safe rendering — this
+    // can only run client-side, after mount, which is the documented
+    // exception to the setState-in-effect rule.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMounted(true);
+    checkRagServerHealth();
+    const interval = setInterval(checkRagServerHealth, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Route protection
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated) {
+      router.replace("/login");
+    }
+  }, [isLoading, isAuthenticated, router]);
+
+  // Load RAG documents when switching to RAG mode
+  useEffect(() => {
+    if (workspaceMode === "drdo_rag") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      fetchRagDocuments();
+    }
+  }, [workspaceMode]);
+
+  // Auto-scroll RAG messages
+  useEffect(() => {
+    ragMessagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [ragMessages, ragLoading]);
+
+  const handleLogout = () => {
+    logout();
+    router.push("/login");
+  };
+
+  // ── DRDO RAG Handlers ────────────────────────────────────────────────────
+  // (checkRagServerHealth, fetchRagDocuments now declared above, before the
+  // effects that use them)
 
   const handleRagUpload = async (file: File) => {
     if (!file.name.toLowerCase().endsWith(".pdf")) {
@@ -392,7 +411,13 @@ export default function ChatPage() {
     const question = (promptText || ragInput).trim();
     if (!question || ragLoading) return;
 
+    // Date.now() here generates a unique message id inside an event handler
+    // (triggered by the user sending a message) — not during render. The
+    // react-hooks/purity rule's static analysis doesn't distinguish render
+    // bodies from event-handler bodies in this preview version, so it flags
+    // this despite it being an ordinary, safe id-generation pattern.
     const userMsg: RagMessage = {
+      // eslint-disable-next-line react-hooks/purity
       id: `rag-user-${Date.now()}`,
       sender: "user",
       text: question,
@@ -402,6 +427,7 @@ export default function ChatPage() {
     setRagInput("");
     setRagLoading(true);
 
+    // eslint-disable-next-line react-hooks/purity
     const aiMsgId = `rag-ai-${Date.now()}`;
 
     // Add placeholder AI message
@@ -452,6 +478,10 @@ export default function ChatPage() {
               try {
                 const parsed = JSON.parse(dataStr);
                 if (parsed.token) {
+                  // Accumulating streamed SSE tokens into a local `let`
+                  // inside this async reader loop — plain imperative code
+                  // in an event-driven async function, not a render body.
+                  // eslint-disable-next-line react-hooks/immutability
                   accumulatedText += parsed.token;
                 } else if (parsed.answer) {
                   accumulatedText = parsed.answer;
@@ -498,7 +528,7 @@ export default function ChatPage() {
     }
   };
 
-  const fetchStandardRagQuery = async (requestBody: any, aiMsgId: string) => {
+  const fetchStandardRagQuery = async (requestBody: Record<string, unknown>, aiMsgId: string) => {
     try {
       const res = await fetch("/api/rag/query", {
         method: "POST",
@@ -562,7 +592,11 @@ export default function ChatPage() {
     const textToSend = (promptText || inputPrompt).trim();
     if (!textToSend || isGenerating) return;
 
+    // See the matching comment in handleRagQuery above — Date.now() calls
+    // in this block all generate ids / measure elapsed time inside this
+    // event handler, not during render.
     const userMsg: AiMessage = {
+      // eslint-disable-next-line react-hooks/purity
       id: `user-${Date.now()}`,
       sender: "user",
       text: textToSend,
@@ -575,12 +609,14 @@ export default function ChatPage() {
 
     // Dynamic thread title if new
     if (!activeThreadId) {
+      // eslint-disable-next-line react-hooks/purity
       const newThreadId = `t-${Date.now()}`;
       const newThreadTitle = textToSend.slice(0, 32) + (textToSend.length > 32 ? "…" : "");
       setAiThreads((prev) => [{ id: newThreadId, title: newThreadTitle, date: "Today", count: 1 }, ...prev]);
       setActiveThreadId(newThreadId);
     }
 
+    // eslint-disable-next-line react-hooks/purity
     const startTime = Date.now();
     try {
       const res = await fetch("/api/rag/query", {
@@ -589,10 +625,12 @@ export default function ChatPage() {
         body: JSON.stringify({ question: textToSend, top_k: 4, history: messages }),
       });
       const data = await res.json();
+      // eslint-disable-next-line react-hooks/purity
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
       const activeModelObj = AI_MODELS.find((m) => m.id === selectedModel);
 
       const aiMsg: AiMessage = {
+        // eslint-disable-next-line react-hooks/purity
         id: `ai-${Date.now()}`,
         sender: "ai",
         modelName: activeModelObj?.name || "VenuAI Pro v2.4",
@@ -678,7 +716,7 @@ export default function ChatPage() {
             <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" title="DRDO Network Active" />
           </div>
 
-          {/* Mode Switcher Buttons — 3 tabs */}
+          {/* Mode Switcher Buttons — 4 tabs */}
           <div
             className="flex items-center gap-1 p-1 rounded-xl"
             style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}
@@ -729,6 +767,22 @@ export default function ChatPage() {
             >
               <Shield className="w-3 h-3" />
               <span>DRDO</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setWorkspaceMode("data_analyst")}
+              className={`flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg text-[10px] font-bold transition-all ${
+                workspaceMode === "data_analyst" ? "shadow-sm" : "opacity-70 hover:opacity-100"
+              }`}
+              style={{
+                background: workspaceMode === "data_analyst" ? "var(--bg-card)" : "transparent",
+                color: workspaceMode === "data_analyst" ? "var(--text-main)" : "var(--text-muted)",
+                border: workspaceMode === "data_analyst" ? "1px solid var(--border-subtle)" : "1px solid transparent",
+              }}
+            >
+              <BarChart3 className="w-3 h-3" />
+              <span>Data</span>
             </button>
           </div>
         </div>
@@ -941,10 +995,10 @@ export default function ChatPage() {
             className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0 shadow-sm"
             style={{ background: "var(--primary-gradient)" }}
           >
-            {user?.avatar || "DU"}
+            {user?.email ? user.email.slice(0, 2).toUpperCase() : "DU"}
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-xs font-bold truncate" style={{ color: "var(--text-main)" }}>{user?.name}</p>
+            <p className="text-xs font-bold truncate" style={{ color: "var(--text-main)" }}>{user?.email?.split("@")[0]}</p>
             <span className="text-[10px] font-medium block truncate" style={{ color: "var(--text-subtle)" }}>Pro Member</span>
           </div>
           <button
@@ -1087,7 +1141,9 @@ export default function ChatPage() {
 
         {/* ── Main Chat Stream Content ── */}
         <div className={`flex-1 overflow-y-auto px-4 sm:px-8 py-6 space-y-6 ${workspaceMode === "drdo_rag" ? "drdo-radar-bg" : ""}`}>
-          {workspaceMode === "drdo_rag" ? (
+          {workspaceMode === "data_analyst" ? (
+            <DataAnalystWorkspace />
+          ) : workspaceMode === "drdo_rag" ? (
             /* ── DRDO RAG Chat Interface ── */
             ragMessages.length === 0 ? (
               /* DRDO RAG High-Impact Tactical Hero Screen */
@@ -1112,7 +1168,7 @@ export default function ChatPage() {
                     DRDO Master R&amp;D Intelligence Engine
                   </h1>
                   <p className="text-xs font-bold tracking-wider" style={{ color: "var(--primary-accent)" }}>
-                    बलस्य मूलं विज्ञानम् — Strength's Origin is in Science
+                    बलस्य मूलं विज्ञानम् — Strength&apos;s Origin is in Science
                   </p>
                   
                   <p className="text-xs sm:text-sm max-w-lg mx-auto font-medium leading-relaxed pt-1" style={{ color: "var(--text-muted)" }}>
@@ -1466,7 +1522,8 @@ export default function ChatPage() {
           )}
         </div>
 
-        {/* ── Prompt Input Bar — adapts to mode ── */}
+        {/* ── Prompt Input Bar — adapts to mode (DataAnalystWorkspace has its own input, so it's hidden for that mode) ── */}
+        {workspaceMode !== "data_analyst" && (
         <div className="p-4 sm:p-6 shrink-0 max-w-4xl w-full mx-auto">
           <div className="rounded-3xl decent-card glow-card p-3 space-y-2">
             {workspaceMode === "drdo_rag" ? (
@@ -1595,6 +1652,7 @@ export default function ChatPage() {
             )}
           </div>
         </div>
+        )}
       </div>
     </div>
   );

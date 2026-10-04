@@ -99,7 +99,7 @@ export const VerificationPanel: React.FC<VerificationPanelProps> = ({
                     </div>
                     {src.chunk_preview && (
                       <div className="text-slate-400 text-[10px] mt-1 line-clamp-2 italic">
-                        "{src.chunk_preview}"
+                        &ldquo;{src.chunk_preview}&rdquo;
                       </div>
                     )}
                   </div>

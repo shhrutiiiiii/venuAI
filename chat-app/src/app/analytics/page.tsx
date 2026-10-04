@@ -118,6 +118,10 @@ export default function AnalyticsPage() {
   };
 
   useEffect(() => {
+    // Standard fetch-on-mount — the setState calls inside loadAnalytics
+    // happen after an await, not synchronously, but the lint rule's static
+    // analysis flags the call site regardless.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadAnalytics();
   }, []);
 

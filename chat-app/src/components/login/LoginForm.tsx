@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 
 import { z } from "zod";
-import { loginSchema, mockLogin } from "@/lib/mockAuth";
+import { loginSchema, login as apiLogin } from "@/lib/authClient";
 
 type LoginFormInput = z.input<typeof loginSchema>;
 type LoginFormData = z.output<typeof loginSchema>;
@@ -150,22 +150,10 @@ export default function LoginForm() {
     defaultValues: { email: "", password: "", rememberMe: false },
   });
 
-  const handleDemoCredentials = useCallback(
-    (email: string, password: string) => {
-      setValue("email", email, { shouldValidate: true, shouldDirty: true });
-      setValue("password", password, { shouldValidate: true, shouldDirty: true });
-      setTimeout(() => {
-        handleSubmit(onSubmit)();
-      }, 300);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [setValue, handleSubmit]
-  );
-
   const onSubmit = async (data: LoginFormInput) => {
     setAuthError(null);
     try {
-      const result = await mockLogin(data.email, data.password, data.rememberMe);
+      const result = await apiLogin(data.email, data.password);
 
       if (!result.success || !result.user) {
         setAuthError(result.error ?? "Authentication failed. Please check credentials.");
@@ -182,6 +170,18 @@ export default function LoginForm() {
       setAuthError("An unexpected error occurred. Please try again.");
     }
   };
+
+  const handleDemoCredentials = useCallback(
+    (email: string, password: string) => {
+      setValue("email", email, { shouldValidate: true, shouldDirty: true });
+      setValue("password", password, { shouldValidate: true, shouldDirty: true });
+      setTimeout(() => {
+        handleSubmit(onSubmit)();
+      }, 300);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [setValue, handleSubmit]
+  );
 
   return (
     <div className="w-full max-w-md mx-auto space-y-4">
@@ -344,7 +344,7 @@ export default function LoginForm() {
             <div className="grid grid-cols-2 gap-2.5">
               <button
                 type="button"
-                onClick={() => handleDemoCredentials("demo@chat.com", "123456")}
+                onClick={() => handleDemoCredentials("demo@chat.com", "demo12345")}
                 className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-semibold border transition-all duration-150 hover:bg-slate-500/5 active:scale-[0.98]"
                 style={{
                   background: "var(--bg-input)",
@@ -375,7 +375,7 @@ export default function LoginForm() {
 
               <button
                 type="button"
-                onClick={() => handleDemoCredentials("admin@chat.com", "admin123")}
+                onClick={() => handleDemoCredentials("admin@chat.com", "admin12345")}
                 className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-semibold border transition-all duration-150 hover:bg-slate-500/5 active:scale-[0.98]"
                 style={{
                   background: "var(--bg-input)",

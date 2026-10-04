@@ -15,7 +15,7 @@ export default function DemoCredentialsBadge({
   );
 
   const DEMO_EMAIL = "demo@chat.com";
-  const DEMO_PASSWORD = "123456";
+  const DEMO_PASSWORD = "demo12345";
 
   const copyToClipboard = async (
     text: string,
@@ -68,7 +68,7 @@ export default function DemoCredentialsBadge({
 
           <button
             type="button"
-            onClick={() => onUseCredentials("admin@chat.com", "admin123")}
+            onClick={() => onUseCredentials("admin@chat.com", "admin12345")}
             className="flex items-center justify-between p-3 rounded-xl text-left transition-all duration-150 border group hover:scale-[1.02]"
             style={{
               background: "var(--bg-input)",

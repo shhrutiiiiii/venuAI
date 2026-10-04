@@ -24,10 +24,9 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
       : String(content || "");
 
   useEffect(() => {
-    if (!isStreaming) {
-      setDisplayedText(safeContent);
-      return;
-    }
+    // When not streaming, render safeContent directly (see below) — no need
+    // to mirror it into state, which was an unnecessary extra render.
+    if (!isStreaming) return;
 
     if (displayedText.length < safeContent.length) {
       const timeout = setTimeout(() => {
@@ -37,9 +36,11 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
     }
   }, [safeContent, displayedText, isStreaming, speedMs]);
 
+  const textToRender = isStreaming ? displayedText : safeContent;
+
   return (
     <div className="relative">
-      <FormattedMarkdown content={displayedText} />
+      <FormattedMarkdown content={textToRender} />
       {isStreaming && (
         <span className="inline-block w-2 h-4 ml-1 bg-purple-400 animate-pulse rounded-xs vertical-middle" />
       )}
