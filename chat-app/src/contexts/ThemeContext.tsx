@@ -17,9 +17,13 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    // Check saved theme or system preference
+    // Reading localStorage/matchMedia can only happen client-side, after
+    // mount — this effect exists specifically to sync from that external
+    // store once, which is the documented exception to "don't setState in
+    // an effect" (https://react.dev/learn/you-might-not-need-an-effect).
     const savedTheme = localStorage.getItem("venu_theme") as Theme | null;
     if (savedTheme && (savedTheme === "dark" || savedTheme === "light")) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setThemeState(savedTheme);
     } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) {
       setThemeState("light");

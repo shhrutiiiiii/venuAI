@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
+import { authHeader } from "@/lib/serverAuthHeader";
 
 const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const response = await fetch(`${RAG_SERVER}/documents`);
+    const response = await fetch(`${RAG_SERVER}/documents`, {
+      headers: authHeader(req),
+    });
     const data = await response.json();
+    if (!response.ok) {
+      return NextResponse.json(data, { status: response.status });
+    }
     return NextResponse.json(data);
   } catch (err) {
     console.error("[RAG Documents] GET Error:", err);
@@ -25,6 +31,7 @@ export async function DELETE(req: NextRequest) {
     }
     const response = await fetch(`${RAG_SERVER}/documents/${docId}`, {
       method: "DELETE",
+      headers: authHeader(req),
     });
     const data = await response.json();
     if (!response.ok) {

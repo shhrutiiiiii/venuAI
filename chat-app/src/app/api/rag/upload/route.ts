@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { authHeader } from "@/lib/serverAuthHeader";
 
 const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
 
@@ -7,6 +8,7 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const response = await fetch(`${RAG_SERVER}/upload`, {
       method: "POST",
+      headers: authHeader(req),
       body: formData,
     });
     const data = await response.json();

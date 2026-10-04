@@ -8,7 +8,7 @@ import React, {
   useCallback,
   ReactNode,
 } from "react";
-import { AuthUser, getSessionUser, mockLogout } from "@/lib/mockAuth";
+import { AuthUser, getSessionUser, logout as apiLogout } from "@/lib/authClient";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -30,11 +30,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUserState] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Hydrate session on mount
+  // Hydrate session on mount by asking the backend (via the httpOnly-cookie
+  // session) who the current user is — the token itself is never readable
+  // from client-side JS.
   useEffect(() => {
-    const sessionUser = getSessionUser();
-    setUserState(sessionUser);
-    setIsLoading(false);
+    let mounted = true;
+    getSessionUser().then((sessionUser) => {
+      if (mounted) {
+        setUserState(sessionUser);
+        setIsLoading(false);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const setUser = useCallback((newUser: AuthUser | null) => {
@@ -42,7 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
-    mockLogout();
+    apiLogout();
     setUserState(null);
   }, []);
 

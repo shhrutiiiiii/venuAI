@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { authHeader } from "@/lib/serverAuthHeader";
 
 const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
 
@@ -9,7 +10,7 @@ export async function POST(req: NextRequest) {
     // Forward all fields including new ones: session_id, user_id, agent_mode, multi_agent_mode
     const response = await fetch(`${RAG_SERVER}/query`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeader(req) },
       body: JSON.stringify(body),
     });
     const data = await response.json();

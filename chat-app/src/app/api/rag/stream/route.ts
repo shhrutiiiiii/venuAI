@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { authHeader } from "@/lib/serverAuthHeader";
 
 const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
 
@@ -12,7 +13,7 @@ export async function POST(req: NextRequest) {
 
     const backendResponse = await fetch(`${RAG_SERVER}/query/stream`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeader(req) },
       body: JSON.stringify(body),
     });
 
