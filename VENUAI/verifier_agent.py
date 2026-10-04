@@ -189,24 +189,28 @@ class VerifierAgent:
             True if the answer is consistent with the question, False otherwise.
         """
         try:
+            from VENUAI.ai_gateway.gateway import get_gateway
+            from VENUAI.ai_gateway.model_router import TaskType
+
             prompt = (
                 f"Question: {question}\n\n"
                 f"Answer (first 300 chars): {answer[:300]}\n\n"
                 "Does this answer actually address the question? "
                 "Respond with exactly YES or NO."
             )
-            model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
-            resp = self.client.chat.completions.create(
-                model=model,
+            gateway = get_gateway(self.client)
+            result = gateway.complete(
+                task_type=TaskType.VERIFICATION,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=5,
                 temperature=0.0,
             )
-            verdict = resp.choices[0].message.content.strip().upper()
+            verdict = result.content.strip().upper()
             return verdict.startswith("YES")
         except Exception as e:
             logger.warning(f"[VerifierAgent] check_consistency LLM call failed: {e}")
-            return True  # assume consistent on error (fail open)
+            return True  # assume consistent on error (fail open) — this is now a real
+            # fallback for genuine failures, not the only code path ever reached.
 
     # ── Answer rewriting ──────────────────────────────────────────────────────
 
@@ -334,3 +338,11 @@ def get_verifier(groq_client) -> VerifierAgent:
     if _verifier is None:
         _verifier = VerifierAgent(groq_client)
     return _verifier
+
+
+def reset_verifier_singleton() -> None:
+    """Test-only hook — see VENUAI.ai_gateway.gateway.reset_gateway_singleton
+    for why this exists (production always passes the same real client;
+    tests inject different fake clients per test and need isolation)."""
+    global _verifier
+    _verifier = None
