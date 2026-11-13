@@ -25,6 +25,9 @@ os.environ["CONTEXTUAL_CHUNKING"] = "false"
 os.environ.setdefault("GROQ_MODEL", "openai/gpt-oss-120b")
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-7f3a9c2e1b8d4f6a-not-for-prod")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
+# Model-based safety classifiers make network calls; tests opt in explicitly with mocks.
+os.environ.setdefault("PROMPT_GUARD_ENABLED", "false")
+os.environ.setdefault("SAFEGUARD_ENABLED", "false")
 
 
 @pytest.fixture(autouse=True)

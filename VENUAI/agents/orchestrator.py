@@ -196,14 +196,14 @@ class OrchestratorAgent:
             # Fallback: concatenate answers
             merged_answer = "\n\n".join(r.answer for r in results)
 
-        avg_confidence = sum(r.confidence for r in results) / len(results)
+        avg_confidence = sum(r.retrieval_coverage for r in results) / len(results)
         agent_names = " + ".join(r.agent_name for r in results)
 
         return AgentResult(
             agent_name=f"Orchestrator({agent_names})",
             answer=merged_answer,
             sources=all_sources,
-            confidence=round(avg_confidence, 2),
+            retrieval_coverage=round(avg_confidence, 2),
             reasoning=f"Multi-domain query handled by {agent_names}.",
             documents=all_documents,
         )

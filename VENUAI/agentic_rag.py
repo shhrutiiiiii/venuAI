@@ -117,6 +117,7 @@ class AgenticRAG:
             compressed_history=compress_history(history or []),
             budget=ContextBudget(),
             semantic_memories=[],
+            citations=False,
         )
 
         gateway = get_gateway(get_groq_client())
@@ -152,7 +153,7 @@ class AgenticRAG:
             prompt_text = build_drdo_prompt(
                 question=question, ranked_docs=ranked_docs,
                 compressed_history=compress_history(history or []),
-                budget=ContextBudget(), semantic_memories=[],
+                budget=ContextBudget(), semantic_memories=[], citations=False,
             )
             result = gateway.complete(task_type=TaskType.GENERATION, messages=[{"role": "user", "content": prompt_text}])
             answer = result.content
