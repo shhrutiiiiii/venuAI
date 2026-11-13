@@ -123,6 +123,25 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# ── Optional Wave B routers ──────────────────────────────────────────────────
+# Streams add endpoints by creating VENUAI/<name>.py exposing `router`
+# (an APIRouter); no further edits to this file are needed. Absent modules
+# are skipped; a module that exists but fails to import is logged loudly.
+import importlib as _importlib
+
+for _mod in ("research_api", "voice_api", "memory_api", "trace_api",
+             "a2a_api", "approvals_api", "export_api"):
+    _full = f"VENUAI.{_mod}"
+    try:
+        app.include_router(_importlib.import_module(_full).router)
+    except ModuleNotFoundError as _e:
+        if _e.name == _full:
+            logger.debug("optional router %s not present", _mod)
+        else:
+            logger.warning("optional router %s failed to import: %s", _mod, _e)
+    except ImportError as _e:
+        logger.warning("optional router %s failed to import: %s", _mod, _e)
+
 # ── Lazy-loaded singletons (initialized on first use) ─────────────────────────
 _embeddings = None
 _vector_store = None
