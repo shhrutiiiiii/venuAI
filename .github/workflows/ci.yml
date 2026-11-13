@@ -22,6 +22,35 @@ jobs:
           JWT_SECRET_KEY: ci-only-secret-never-used-outside-ci-runners
         run: pytest VENUAI/tests/ -v
 
+  evals:
+    runs-on: ubuntu-latest
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      JWT_SECRET_KEY: ci-only-secret-never-used-outside-ci-runners
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend dependencies
+        run: pip install -r VENUAI/requirements.txt
+      - name: Eval metric/harness unit tests (deterministic, no network)
+        run: pytest VENUAI/tests/test_eval_harness.py VENUAI/tests/test_retrieval_metrics.py -q
+      - name: Live eval (only when GROQ_API_KEY secret exists)
+        run: |
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "GROQ_API_KEY secret not set - skipping live eval"
+          else
+            python -m VENUAI.evals.eval_runner run --limit 10 --judge --gate --out-dir eval-out
+          fi
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval-out
+          if-no-files-found: ignore
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

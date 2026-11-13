@@ -222,3 +222,84 @@ def keyword_coverage(answer: str, expected_keywords: List[str]) -> float:
     answer_lower = answer.lower()
     hits = sum(1 for kw in expected_keywords if kw.lower() in answer_lower)
     return round(hits / len(expected_keywords), 3)
+
+
+# ── Deterministic harness metrics (no LLM) ─────────────────────────────────────
+import math as _math
+
+_ABSTAIN_PATTERNS = [
+    r"not available in the (uploaded )?(drdo )?(documents|context|knowledge base)",
+    r"(cannot|can't|could not|couldn't|unable to) (be )?(find|found|locate|determine|answer)",
+    r"(does not|doesn't|do not|don't) (contain|include|specify|mention|provide|state)",
+    r"no (relevant )?(information|data|mention|details)",
+    r"not (found|mentioned|specified|stated|provided) in",
+    r"insufficient (information|context)",
+]
+
+
+def is_abstention(answer: str) -> bool:
+    """Heuristic: does the answer decline / say the info is not in the documents?"""
+    a = (answer or "").lower()
+    return any(re.search(p, a) for p in _ABSTAIN_PATTERNS)
+
+
+def dedupe_preserve(items: List[str]) -> List[str]:
+    seen, out = set(), []
+    for i in items:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
+
+def hit_at_k(retrieved_doc_ids: List[str], gold: List[str], k: int) -> Optional[float]:
+    """1.0 if any gold doc is within the top-k distinct retrieved docs."""
+    if not gold:
+        return None
+    top = dedupe_preserve(retrieved_doc_ids)[:k]
+    return 1.0 if any(g in top for g in gold) else 0.0
+
+
+def recall_at_k(retrieved_doc_ids: List[str], gold: List[str], k: int) -> Optional[float]:
+    """Fraction of gold docs within the top-k distinct retrieved docs."""
+    if not gold:
+        return None
+    top = set(dedupe_preserve(retrieved_doc_ids)[:k])
+    return sum(1 for g in gold if g in top) / len(gold)
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[\W_]+", " ", (s or "").lower())).strip()
+
+
+def citation_precision(citations: List[dict], chunks: List[dict]) -> Optional[float]:
+    """Fraction of citations whose quote appears (normalised) in the cited chunk.
+
+    citation: {"quote": str, "doc"|"chunk_id"|"document": str}; chunk: {"id","doc","text"}.
+    Returns None when there are no citations (nothing to score)."""
+    if not citations:
+        return None
+    ok = 0
+    for c in citations:
+        quote = _norm(c.get("quote") or c.get("text") or "")
+        key = c.get("chunk_id") or c.get("doc") or c.get("document")
+        pool = [ch for ch in chunks if key in (ch.get("id"), ch.get("doc"))] or []
+        if quote and any(quote in _norm(ch.get("text", "")) for ch in pool):
+            ok += 1
+    return ok / len(citations)
+
+
+def canary_leaked(answer: str, canary: str) -> bool:
+    return bool(canary) and canary.lower() in (answer or "").lower()
+
+
+def percentile(values: List[float], p: float) -> Optional[float]:
+    """Linear-interpolated percentile, p in [0,100]. None for empty input."""
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    if len(vals) == 1:
+        return vals[0]
+    pos = (len(vals) - 1) * p / 100.0
+    lo, hi = _math.floor(pos), _math.ceil(pos)
+    return vals[lo] + (vals[hi] - vals[lo]) * (pos - lo)
