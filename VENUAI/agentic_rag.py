@@ -107,8 +107,7 @@ class AgenticRAG:
         from VENUAI.ai_gateway.gateway import get_gateway
         from VENUAI.ai_gateway.model_router import TaskType
         from VENUAI.verification_pipeline import get_verification_pipeline
-        from groq import Groq
-        from VENUAI.rag_server import GROQ_API_KEY
+        from VENUAI.ai_gateway.provider import get_groq_client
 
         t_start = time.time()
         all_docs: List[Document] = []
@@ -150,7 +149,7 @@ class AgenticRAG:
             semantic_memories=[],
         )
 
-        gateway = get_gateway(Groq(api_key=GROQ_API_KEY))
+        gateway = get_gateway(get_groq_client())
         result = gateway.complete(task_type=TaskType.GENERATION, messages=[{"role": "user", "content": prompt_text}])
         answer = result.content
 

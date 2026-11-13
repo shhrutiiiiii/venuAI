@@ -40,7 +40,7 @@ def test_no_vision_model_is_registered(monkeypatch):
 
 def test_get_model_by_id(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "fake-key")
-    m = model_registry.get_model("llama-3.3-70b-versatile")
+    m = model_registry.get_model("openai/gpt-oss-120b")
     assert m is not None
     assert m.provider == "groq"
 
@@ -52,7 +52,7 @@ def test_route_fast_classification_returns_fast_models(monkeypatch):
     monkeypatch.delenv("GROQ_MODEL", raising=False)
     chain = route(TaskType.FAST_CLASSIFICATION)
     assert len(chain) > 0
-    assert all(ModelCapability.FAST in m.capabilities for m in chain)
+    assert ModelCapability.FAST in chain[0].capabilities
 
 
 def test_route_respects_groq_model_override(monkeypatch):
@@ -93,7 +93,7 @@ class _FakeGroqClient:
         self.calls = 0
 
         class _Completions:
-            def create(inner_self, model, messages, max_tokens, temperature):
+            def create(inner_self, model, messages, max_tokens, temperature, **kwargs):
                 self.calls += 1
                 if self.calls <= self.fail_times:
                     raise self.exc
@@ -107,7 +107,7 @@ class _FakeGroqClient:
 
 def test_groq_provider_returns_completion_result():
     provider = GroqProvider(_FakeGroqClient())
-    result = provider.complete("llama-3.3-70b-versatile", [{"role": "user", "content": "hi"}], 100, 0.2)
+    result = provider.complete("openai/gpt-oss-120b", [{"role": "user", "content": "hi"}], 100, 0.2)
     assert result.content == "hello from fake groq"
     assert result.provider == "groq"
     assert result.input_tokens == 10

@@ -48,6 +48,9 @@ def init_db() -> None:
             )
             """
         )
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(model_routing_log)")}
+        if "ttft_ms" not in cols:  # streaming time-to-first-token (added with AIGateway.stream)
+            conn.execute("ALTER TABLE model_routing_log ADD COLUMN ttft_ms REAL")
         conn.commit()
 
 
@@ -66,6 +69,7 @@ class RoutingLogEntry:
     output_tokens: Optional[int]
     success: bool
     error: Optional[str] = None
+    ttft_ms: Optional[float] = None   # streaming only: time to first chunk
 
 
 def record(entry: RoutingLogEntry) -> None:
@@ -74,13 +78,13 @@ def record(entry: RoutingLogEntry) -> None:
             """
             INSERT INTO model_routing_log
                 (timestamp, task_type, requested_chain, model_used, provider,
-                 fallback_count, latency_ms, input_tokens, output_tokens, success, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 fallback_count, latency_ms, input_tokens, output_tokens, success, error, ttft_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 time.time(), entry.task_type, entry.requested_chain, entry.model_used,
                 entry.provider, entry.fallback_count, entry.latency_ms,
-                entry.input_tokens, entry.output_tokens, int(entry.success), entry.error,
+                entry.input_tokens, entry.output_tokens, int(entry.success), entry.error, entry.ttft_ms,
             ),
         )
         conn.commit()

@@ -24,7 +24,7 @@ class _FakeGroqClient:
         self.answer_text = answer_text
 
         class _Completions:
-            def create(inner_self, model, messages, max_tokens, temperature):
+            def create(inner_self, model, messages, max_tokens, temperature, **_kw):
                 return _FakeResponse(answer_text)
 
         class _Chat:
@@ -51,7 +51,7 @@ def test_research_endpoint_requires_auth(client):
 
 def test_research_endpoint_returns_result_and_persists_to_memory(client, monkeypatch):
     monkeypatch.setattr(rag_server, "get_vector_store", lambda: _EmptyFakeVectorStore())
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient("A fake research answer."))
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient("A fake research answer."))
     monkeypatch.setattr(
         "VENUAI.hallucination_detector.get_hallucination_detector",
         lambda: type("S", (), {"analyze": staticmethod(lambda a, d: (a, 0.0, []))})(),

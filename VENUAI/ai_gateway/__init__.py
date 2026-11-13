@@ -2,7 +2,7 @@
 VENUAI AI Gateway — Phase 1 of the multi-model/multi-agent architecture.
 
 This package consolidates what were previously three separate, duplicated
-ad hoc Groq-calling code paths (VENUAI/rag_server.py's create_groq_completion,
+ad hoc Groq-calling code paths (formerly VENUAI/rag_server.py create_groq_completion,
 VENUAI/agents/orchestrator.py's two direct calls, VENUAI/agents/base_agent.py's
 candidate-model loop) into one gateway with a real model registry, router,
 retry/fallback policy, and telemetry log.

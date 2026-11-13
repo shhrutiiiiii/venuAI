@@ -22,6 +22,24 @@ Before this existed, three call sites each reimplemented model-name fallback ind
 | `gateway.py` | `AIGateway.complete()` — the single call surface; bounded retries + backoff/jitter per model, a per-model in-memory circuit breaker, `AIServiceUnavailableError` when the whole chain fails |
 | `telemetry.py` | SQLite log (`VENUAI/data/model_routing_log.db`) of every call: task type, chain tried, model used, fallback count, latency, token counts, success/error — never logs message content |
 
+## Current Catalog and Behaviour (ADR-014)
+| Model | Capabilities | Context | Notes |
+|---|---|---|---|
+| `openai/gpt-oss-120b` | REASONING | 131,072 | Primary; `reasoning_effort` supported |
+| `openai/gpt-oss-20b` | FAST | 131,072 | Classification; last-resort generation fallback |
+| `qwen/qwen3.8-27b` | REASONING, JUDGE | 131,072 | Different family: fallback and independent eval judge; reasoning hidden via `reasoning_format` |
+| `openai/gpt-oss-safeguard-20b` | SAFETY | 131,072 | Policy classifier, never in a chat chain |
+| `meta-llama/llama-prompt-guard-2-86m` | PROMPT_GUARD | 512 | Injection classifier, never in a chat chain |
+
+Context windows come from Groq `GET /openai/v1/models`. The retired `llama-3.3-70b-versatile` / `llama-3.1-8b-instant` are not in the registry.
+
+- **Chain order:** `GROQ_MODEL` override (must be an enabled chat model), then models with the task's capability (latency class, then catalog order), then every other enabled chat model. GENERATION: gpt-oss-120b, qwen3.8-27b, gpt-oss-20b. FAST_CLASSIFICATION: gpt-oss-20b first.
+- **Reasoning effort:** FAST_CLASSIFICATION `low`; GENERATION/SYNTHESIS/VERIFICATION `medium`. Passed only to models with `reasoning_style="effort"`; reasoning is excluded from content (`include_reasoning=False` / `reasoning_format="hidden"`, plus a defensive `<think>` strip) and `max_tokens` is increased by a reasoning headroom.
+- **Timeouts:** all clients come from `provider.get_groq_client()/get_async_groq_client()/get_chat_groq()`: `GROQ_TIMEOUT_SECONDS` (default 30), SDK `max_retries=1`; the gateway owns retries.
+- **Streaming:** `AIGateway.stream()` (sync) / `astream()` (async, worker threads) use the same chain and circuit breaker; retry/fallback only before the first chunk. The result exposes `model_used`, `ttft_ms`; telemetry (`model_routing_log.db`, column `ttft_ms`) is written when the stream ends. A failure after the first chunk is raised, not retried. `/query/stream` emits a `{"model": ...}` SSE event before tokens.
+- **Routed through the gateway:** `generate_node` and `fallback_kb_node` (via `get_llm()`, a thin gateway adapter), `/query/stream`, and all agents. **Not** gateway-routed: the ReAct agent (needs a LangChain chat model) is built with `get_chat_groq` on the router's first model; its response reports that model.
+- **Labels:** `model` in responses is the model that answered; `/health` reports `llm.primary_model` and `llm.fallback_chain` from the registry.
+
 ## Design Principles
 1. **One call surface, not three.** Any new LLM-dependent code should call `AIGateway.complete(task_type, messages, ...)`, not construct its own retry loop.
 2. **`GROQ_MODEL` override is respected, not silently overridden by "smarter" routing** — an operator who sets this env var still gets it tried first for every task type.
@@ -55,7 +73,7 @@ A `CompletionResult` (content, model_id, provider, token counts) or `AIServiceUn
 - `VENUAI/agents/orchestrator.py`, `VENUAI/agents/base_agent.py`, `VENUAI/verifier_agent.py`, `VENUAI/research_planner.py`, `VENUAI/agentic_rag.py`, `VENUAI/agents/deep_research_agent.py`, `VENUAI/agents/data_analyst_agent.py`, `VENUAI/agents/vision_agent.py` — all route their LLM calls through this gateway.
 
 ## Interactions with Other Services
-**Not yet covered by this gateway**: the LangChain/LangGraph-based paths — `generate_node` (standard RAG generation), the ReAct agent, and `/query/stream` — which use LangChain's own `ChatGroq` abstraction instead. That is a real, working provider abstraction in its own right; routing those through `AIGateway` too is a reasonable follow-up, not done in this phase to avoid rewriting already-tested generation/streaming code in the same change that introduced new infrastructure. `create_groq_completion` (the streaming fallback helper) *does* pull its candidate model list from `model_router.route()`, so there's still only one place model ids are maintained, even though the actual completion call there bypasses the gateway's retry/circuit-breaker logic.
+**Not covered by this gateway**: only the ReAct agent (LangGraph prebuilt needs a LangChain chat model); see "Current Catalog and Behaviour" above. `generate_node`, `fallback_kb_node` and `/query/stream` now go through the gateway (ADR-014).
 
 `GET /models` (Phase 4) exposes `model_registry.get_catalog()` read-only, `enabled` reflecting live provider configuration — backs the Research Workspace's "Agents & Models" panel (`chat-app/src/app/workspace/page.tsx`). Listing only, no runtime model-switching UI.
 
@@ -66,7 +84,7 @@ No new secret-handling — the gateway is constructed with the same `groq_client
 The circuit breaker is in-memory, per-process — a restart resets it. Acceptable for a single-process deployment (Phase 1 ADR-003); would need a shared store (Redis) if ever run with multiple backend replicas.
 
 ## Future Improvements
-1. Route the LangChain/LangGraph call paths through this gateway too (see Interactions above).
+1. Route the ReAct agent through the gateway too (needs a LangChain-compatible adapter; generate/fallback/stream are done).
 2. Smarter routing by historical failure rate / cost, once real usage data exists in `model_routing_log.db` to inform it — today's routing is capability + env-override + latency-class only, deliberately not "smart" without data behind it.
 3. A real `OpenAIProvider`/`LocalProvider` implementation if/when those credentials or a local runtime are actually configured.
 

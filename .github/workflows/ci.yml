@@ -18,7 +18,7 @@ jobs:
       - name: Run backend test suite
         env:
           GROQ_API_KEY: ci-placeholder-not-a-real-key
-          GROQ_MODEL: llama-3.3-70b-versatile
+          GROQ_MODEL: openai/gpt-oss-120b
           JWT_SECRET_KEY: ci-only-secret-never-used-outside-ci-runners
         run: pytest VENUAI/tests/ -v
 

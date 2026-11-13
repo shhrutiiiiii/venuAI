@@ -26,7 +26,7 @@ class _FakeResponse:
 class _FakeGroqClient:
     def __init__(self, response_text='{"entities": [], "relationships": []}'):
         class _Completions:
-            def create(inner_self, model, messages, max_tokens, temperature):
+            def create(inner_self, model, messages, max_tokens, temperature, **_kw):
                 return _FakeResponse(response_text)
 
         class _Chat:
@@ -61,7 +61,7 @@ def test_extract_requires_auth(client):
 
 
 def test_extract_finds_real_lab_mention(client, auth_headers, monkeypatch):
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient())
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient())
 
     r = client.post(
         "/graph/extract",
@@ -83,7 +83,7 @@ def test_extract_blocks_prompt_injection(client, auth_headers):
 
 
 def test_get_entity_and_relationships(client, auth_headers, monkeypatch):
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient())
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient())
 
     extract = client.post(
         "/graph/extract",
@@ -105,7 +105,7 @@ def test_get_entity_and_relationships(client, auth_headers, monkeypatch):
 
 
 def test_other_user_cannot_see_private_entity(client, auth_headers, monkeypatch):
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient())
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient())
 
     extract = client.post(
         "/graph/extract",
@@ -123,7 +123,7 @@ def test_other_user_cannot_see_private_entity(client, auth_headers, monkeypatch)
 
 
 def test_search_entities(client, auth_headers, monkeypatch):
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient())
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient())
 
     client.post("/graph/extract", json={"text": "LRDE develops radar systems.", "use_llm": False}, headers=auth_headers)
     client.post("/graph/extract", json={"text": "DRDL works on missile systems.", "use_llm": False}, headers=auth_headers)
@@ -149,7 +149,7 @@ def test_research_endpoint_with_extract_graph_populates_graph(client, auth_heade
     monkeypatch.setattr(rag_server, "get_vector_store", lambda: _EmptyFakeVectorStore())
     monkeypatch.setattr(
         "groq.Groq",
-        lambda api_key: _FakeGroqClient("LRDE develops the Uttam radar system for DRDO."),
+        lambda api_key=None, **_kw: _FakeGroqClient("LRDE develops the Uttam radar system for DRDO."),
     )
     monkeypatch.setattr(
         "VENUAI.hallucination_detector.get_hallucination_detector",

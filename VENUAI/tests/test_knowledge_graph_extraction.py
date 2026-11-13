@@ -76,7 +76,7 @@ class _FakeGroqClient:
         self.response_text = response_text
 
         class _Completions:
-            def create(inner_self, model, messages, max_tokens, temperature):
+            def create(inner_self, model, messages, max_tokens, temperature, **_kw):
                 return _FakeResponse(response_text)
 
         class _Chat:

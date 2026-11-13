@@ -52,7 +52,7 @@ class VerifierAgent:
     """
     Verifies AI answers against source documents and DRDO policy.
 
-    Uses a fast Groq model (llama-3.1-8b-instant) for the consistency
+    Uses a fast Groq model (openai/gpt-oss-20b via TaskType.FAST_CLASSIFICATION) for the consistency
     check; all other checks are local (regex / string operations).
     """
 
