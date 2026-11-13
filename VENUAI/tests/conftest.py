@@ -17,6 +17,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 os.environ.setdefault("GROQ_API_KEY", "test-key-not-real")
+# Retrieval quality features that need a model or an LLM are off by default in
+# unit tests; tests of those features enable them explicitly (monkeypatch).
+os.environ["RERANKER_ENABLED"] = "false"
+os.environ["QUERY_REWRITE_ENABLED"] = "false"
+os.environ["CONTEXTUAL_CHUNKING"] = "false"
 os.environ.setdefault("GROQ_MODEL", "llama-3.3-70b-versatile")
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-7f3a9c2e1b8d4f6a-not-for-prod")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")

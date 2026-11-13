@@ -152,18 +152,29 @@ _embeddings = None
 _vector_store = None
 _llm = None
 
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+def get_embedding_model_name() -> str:
+    """Env EMBEDDING_MODEL; default keeps the existing chroma_db valid.
+    Changing it requires re-indexing - see Documents/AI/retrieval.md."""
+    return os.getenv("EMBEDDING_MODEL", "").strip() or DEFAULT_EMBEDDING_MODEL
+
+
 def get_embeddings():
     global _embeddings
     if _embeddings is None:
-        logger.info("Loading embedding model (sentence-transformers/all-MiniLM-L6-v2)…")
+        name = get_embedding_model_name()
+        logger.info(f"Loading embedding model ({name})...")
         from langchain_community.embeddings import HuggingFaceEmbeddings
         _embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_name=name,
             model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True},
         )
-        logger.info("Embedding model loaded ✓")
+        logger.info("Embedding model loaded")
     return _embeddings
+
 
 def get_vector_store():
     global _vector_store
@@ -174,7 +185,35 @@ def get_vector_store():
             embedding_function=get_embeddings(),
             persist_directory=str(CHROMA_DIR),
         )
+        _check_embedding_model(_vector_store)
     return _vector_store
+
+
+def _check_embedding_model(vs) -> None:
+    """
+    Record the embedding model in the collection metadata (only on an empty
+    collection - existing data is never touched) and warn loudly when the
+    configured model differs from the one the collection was built with.
+    Legacy collections without the key were built with the default model.
+    """
+    name = get_embedding_model_name()
+    try:
+        col = vs._collection
+        stored = (col.metadata or {}).get("embedding_model")
+        if stored is None:
+            if col.count() == 0:
+                col.modify(metadata={**(col.metadata or {}), "embedding_model": name})
+            elif name != DEFAULT_EMBEDDING_MODEL:
+                stored = DEFAULT_EMBEDDING_MODEL  # legacy collection
+        if stored is not None and stored != name:
+            logger.warning(
+                f"EMBEDDING MODEL MISMATCH: collection was built with '{stored}' but EMBEDDING_MODEL "
+                f"is '{name}'. Retrieval quality will be garbage until you re-index "
+                "(see Documents/AI/retrieval.md)."
+            )
+    except Exception as err:
+        logger.warning(f"Could not verify embedding model against collection metadata: {err}")
+
 
 def get_llm():
     global _llm
@@ -606,7 +645,7 @@ def health_check():
         "version": "1.1.0",
         "documents_ingested": len(meta),
         "vector_store": "ChromaDB (local)",
-        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "embedding_model": get_embedding_model_name(),
         "llm": "groq/compound (Groq)",
         "note": "Embedding model loads on first upload/query",
     }
@@ -680,9 +719,20 @@ async def upload_document(
         chunk.metadata["drdo_labs"]      = ",".join(doc_tags.drdo_labs)
         chunk.metadata["classification"] = doc_tags.classification_level
 
+    # ── Ingest finalisation point: chunks are final text here. Any chunk
+    # sanitiser/filter must run immediately BEFORE the contextualisation
+    # below, so prefixes and embeddings are built from the sanitised text. ──
+
+    # Contextual chunking (VENUAI/contextual_chunking.py): FAST-model context
+    # prefix per chunk, embedded + BM25-indexed but never displayed.
+    from starlette.concurrency import run_in_threadpool
+    from VENUAI.contextual_chunking import add_context_prefixes
+    await run_in_threadpool(add_context_prefixes, chunks, raw_pages, file.filename)
+
     # Embed + store (embedding model loads here on first call)
+    from VENUAI.retrieval import index_chunks
     vs = get_vector_store()
-    vs.add_documents(chunks)
+    index_chunks(vs, chunks)   # also invalidates the BM25 cache
     vs.persist()
 
     num_chunks = len(chunks)
@@ -792,6 +842,12 @@ class RAGGraphState(TypedDict):
     # code already depends on — this is additive detail for the explorer
     # UI, not a replacement.
     evidence_claims: List[dict]
+    # Retrieval quality (VENUAI/retrieval.py): the standalone query actually
+    # searched (the original question is still what generation answers),
+    # per-chunk relevance scores, and the abstention flag.
+    retrieval_query: str
+    retrieval_scores: List[dict]
+    insufficient_context: bool
 
 
 def get_visible_doc_ids(current_user: AuthenticatedUser) -> Optional[List[str]]:
@@ -820,74 +876,49 @@ def get_visible_doc_ids(current_user: AuthenticatedUser) -> Optional[List[str]]:
 
 
 def retrieve_node(state: RAGGraphState) -> dict:
+    """
+    History-aware rewrite -> dense + cached BM25 -> RRF -> cross-encoder
+    rerank -> relevance floor. All of it lives in VENUAI.retrieval (shared
+    with agentic_rag / agent_tools). Authorization: allowed_doc_ids filters
+    every stage; an empty list retrieves nothing.
+    """
+    from VENUAI.retrieval import retrieve_documents
+
     question = state["question"]
     top_k = state.get("top_k", 4)
-    allowed_doc_ids = state.get("allowed_doc_ids")
-    vs = get_vector_store()
-
-    chroma_search_kwargs = {"k": top_k}
-    if allowed_doc_ids is not None:
-        # Empty list means the caller owns no documents and nothing is public —
-        # must retrieve nothing, not fall through to an unfiltered search.
-        chroma_search_kwargs["filter"] = {"doc_id": {"$in": allowed_doc_ids or ["__none__"]}}
-
-    chroma_retriever = vs.as_retriever(
-        search_type="similarity",
-        search_kwargs=chroma_search_kwargs,
+    res = retrieve_documents(
+        get_vector_store(), question, top_k, state.get("allowed_doc_ids"),
+        history=state.get("history") or state.get("working_memory") or [],
     )
+    return {
+        "documents": res.documents,
+        "retrieval_query": res.retrieval_query,
+        "retrieval_scores": res.scores,
+        "insufficient_context": res.insufficient_context,
+    }
 
-    retriever = chroma_retriever
-    try:
-        chroma_data = vs.get()
-        if chroma_data and chroma_data.get("documents") and len(chroma_data["documents"]) > 0:
-            from langchain_community.retrievers import BM25Retriever
-            from langchain.retrievers import EnsembleRetriever
 
-            pairs = zip(chroma_data["documents"], chroma_data.get("metadatas", []))
-            if allowed_doc_ids is not None:
-                allowed_set = set(allowed_doc_ids)
-                pairs = [
-                    (txt, meta) for txt, meta in pairs
-                    if (meta or {}).get("doc_id") in allowed_set
-                ]
-            doc_objects = [
-                Document(page_content=txt, metadata=meta or {})
-                for txt, meta in pairs
-            ]
-            if doc_objects:
-                bm25_retriever = BM25Retriever.from_documents(doc_objects)
-                bm25_retriever.k = top_k
-                retriever = EnsembleRetriever(
-                    retrievers=[chroma_retriever, bm25_retriever],
-                    weights=[0.5, 0.5]
-                )
-                logger.info("LangGraph [Retrieve Node]: Hybrid Search (Chroma + BM25) active.")
-            elif allowed_doc_ids is not None:
-                # Caller is authorized to see nothing in the corpus — return no
-                # documents rather than silently falling back to an unfiltered
-                # Chroma-only retriever, which would defeat the filter above.
-                return {"documents": []}
-    except Exception as err:
-        logger.warning(f"LangGraph [Retrieve Node]: Chroma vector search fallback ({err})")
+ABSTAIN_ANSWER = (
+    "I couldn't find this in the uploaded documents. No passage was relevant enough "
+    "to answer it reliably - try rephrasing, or upload the relevant document."
+)
 
-    retrieved_docs = retriever.invoke(question)
 
-    # Phase 4: fold in table/image region hits from multimodal-ingested
-    # documents (VENUAI/multimodal_retrieval.py), same allowed_doc_ids
-    # filter as the text-chunk retrieval above. Previously /upload/multimodal
-    # content was only reachable via the standalone /documents/regions/search
-    # endpoint — a user asking a question through the normal /query path got
-    # no benefit from a table/image they'd already uploaded. Best-effort: a
-    # lexical-search failure here must not break the text-chunk answer.
-    try:
-        from VENUAI.multimodal_retrieval import retrieve_multimodal_documents
-        region_docs = retrieve_multimodal_documents(question, allowed_doc_ids, top_k=3)
-        if region_docs:
-            retrieved_docs = list(retrieved_docs) + region_docs
-    except Exception as err:
-        logger.warning(f"LangGraph [Retrieve Node]: multimodal region retrieval skipped ({err})")
+def abstain_node(state: RAGGraphState) -> dict:
+    """Deterministic short-circuit when retrieval found nothing relevant (no LLM call)."""
+    return {
+        "answer": ABSTAIN_ANSWER,
+        "annotated_answer": ABSTAIN_ANSWER,
+        "sources": [],
+        "documents": [],
+        "verification_flags": ["INSUFFICIENT_CONTEXT"],
+        "model_used": "retrieval-abstain (no LLM call)",
+        "insufficient_context": True,
+    }
 
-    return {"documents": retrieved_docs}
+
+def route_after_retrieve(state: RAGGraphState) -> str:
+    return "abstain" if state.get("insufficient_context") else "generate"
 
 
 def generate_node(state: RAGGraphState) -> dict:
@@ -1054,7 +1085,11 @@ workflow.add_conditional_edges(
     route_query_node,
     {"retrieve": "retrieve", "fallback_kb": "fallback_kb"}
 )
-workflow.add_edge("retrieve",    "generate")
+workflow.add_node("abstain",     abstain_node)
+workflow.add_conditional_edges(
+    "retrieve", route_after_retrieve, {"generate": "generate", "abstain": "abstain"}
+)
+workflow.add_edge("abstain",     END)
 workflow.add_edge("generate",    "verify")          # NEW: verification after generate
 workflow.add_edge("verify",      END)
 workflow.add_edge("fallback_kb", END)
@@ -1315,6 +1350,9 @@ def query_knowledge_base(
             "contradicted_claim_count": 0,
             "critique_passed":     False,
             "evidence_claims":     [],
+            "retrieval_query":     req.question,
+            "retrieval_scores":    [],
+            "insufficient_context": False,
         })
         t_end = _time.time()
         final_answer = final_state.get("answer", "No response generated.")
@@ -1651,6 +1689,8 @@ def delete_document(doc_id: str, current_user: AuthenticatedUser = Depends(get_c
         raise HTTPException(status_code=403, detail="You do not have permission to delete this document.")
     vs = get_vector_store()
     vs._collection.delete(where={"doc_id": doc_id})
+    from VENUAI.retrieval import bump_corpus_version
+    bump_corpus_version()
     vs.persist()
     file_path = Path(doc_info.get("file_path", ""))
     if file_path.exists():

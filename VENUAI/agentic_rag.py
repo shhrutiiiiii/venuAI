@@ -39,60 +39,30 @@ class AgenticRAGResult:
     loop_limit_reached: bool = False
 
 
-def _retrieve(question: str, top_k: int, allowed_doc_ids: Optional[List[str]]) -> List[Document]:
-    """Same hybrid Chroma+BM25 retrieval as VENUAI.rag_server.retrieve_node,
-    reused via import rather than duplicated — local import avoids a
-    circular dependency (rag_server also imports from this module's sibling
-    modules)."""
+def _retrieve(
+    question: str, top_k: int, allowed_doc_ids: Optional[List[str]],
+    history: Optional[List[dict]] = None, rewrite: bool = False,
+) -> List[Document]:
+    """Same pipeline as VENUAI.rag_server.retrieve_node (shared
+    VENUAI.retrieval.retrieve_documents: dense + cached BM25 -> RRF ->
+    cross-encoder rerank -> relevance floor, multimodal regions included).
+    Local import avoids a circular dependency with rag_server."""
     from VENUAI.rag_server import get_vector_store
+    from VENUAI.retrieval import retrieve_documents
 
-    search_kwargs = {"k": top_k}
-    if allowed_doc_ids is not None:
-        search_kwargs["filter"] = {"doc_id": {"$in": allowed_doc_ids or ["__none__"]}}
-
-    vs = get_vector_store()
-    retriever = vs.as_retriever(search_type="similarity", search_kwargs=search_kwargs)
-    try:
-        chroma_data = vs.get()
-        if chroma_data and chroma_data.get("documents"):
-            from langchain_community.retrievers import BM25Retriever
-            from langchain.retrievers import EnsembleRetriever
-
-            pairs = zip(chroma_data["documents"], chroma_data.get("metadatas", []))
-            if allowed_doc_ids is not None:
-                allowed_set = set(allowed_doc_ids)
-                pairs = [(t, m) for t, m in pairs if (m or {}).get("doc_id") in allowed_set]
-            docs = [Document(page_content=t, metadata=m or {}) for t, m in pairs]
-            if docs:
-                bm25 = BM25Retriever.from_documents(docs)
-                bm25.k = top_k
-                retriever = EnsembleRetriever(retrievers=[retriever, bm25], weights=[0.5, 0.5])
-    except Exception as err:
-        logger.warning(f"[AgenticRAG] hybrid retrieval fallback: {err}")
-
-    docs = retriever.invoke(question)
-
-    # Same multimodal-region fold-in as VENUAI.rag_server.retrieve_node —
-    # see that function's comment and Documents/AI/multimodal.md. Best-effort:
-    # a lexical-search failure here must not break the text-chunk answer.
-    try:
-        from VENUAI.multimodal_retrieval import retrieve_multimodal_documents
-        region_docs = retrieve_multimodal_documents(question, allowed_doc_ids, top_k=3)
-        if region_docs:
-            docs = list(docs) + region_docs
-    except Exception as err:
-        logger.warning(f"[AgenticRAG] multimodal region retrieval skipped: {err}")
-
-    return docs
+    return retrieve_documents(
+        get_vector_store(), question, top_k, allowed_doc_ids,
+        history=history, rewrite=rewrite,
+    ).documents
 
 
-def _expand_query(question: str, round_num: int) -> str:
-    """Deterministic query expansion for a re-retrieval round — not an LLM
-    call (keeps each retrieval round cheap and fast). Appends broader
-    context terms so round 2+ can surface chunks round 1 missed."""
-    if round_num == 1:
-        return f"{question} overview background context"
-    return f"{question} details specifications technical parameters"
+def _expand_query(question: str, round_num: int, previous_query: str = "") -> str:
+    """Re-retrieval round query: an LLM-written alternative phrasing (FAST
+    model via the gateway; VENUAI/query_rewriter.py), replacing the old canned
+    'overview background context' suffix. Returns the original question on
+    failure, in which case round 2 finds nothing new and the loop stops."""
+    from VENUAI.query_rewriter import expand_query_llm
+    return expand_query_llm(question, round_num, previous_query)
 
 
 class AgenticRAG:
@@ -123,7 +93,7 @@ class AgenticRAG:
                 break
 
             rounds_used = round_num
-            new_docs = _retrieve(current_query, top_k, allowed_doc_ids)
+            new_docs = _retrieve(current_query, top_k, allowed_doc_ids, history=history, rewrite=(round_num == 1))
             for doc in new_docs:
                 key = (doc.metadata.get("doc_id"), doc.metadata.get("page"), doc.page_content[:80])
                 if key not in seen_keys:
@@ -136,7 +106,7 @@ class AgenticRAG:
             # necessary-but-not-sufficient early-exit, not the final verdict.
             if all_docs:
                 break
-            current_query = _expand_query(question, round_num)
+            current_query = _expand_query(question, round_num, current_query)
 
         if time.time() - t_start > MAX_RUNTIME_SECONDS:
             loop_limit_reached = True
@@ -167,7 +137,7 @@ class AgenticRAG:
             and time.time() - t_start <= MAX_RUNTIME_SECONDS
         ):
             rounds_used += 1
-            current_query = _expand_query(question, rounds_used)
+            current_query = _expand_query(question, rounds_used, current_query)
             new_docs = _retrieve(current_query, top_k, allowed_doc_ids)
             added = False
             for doc in new_docs:
