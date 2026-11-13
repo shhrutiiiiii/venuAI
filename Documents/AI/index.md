@@ -17,7 +17,7 @@ A single `/query` request can run through one of **three distinct execution path
 
 | Mode | Flag | Mechanism | Doc |
 |---|---|---|---|
-| Standard RAG | (default, both false) | LangGraph `StateGraph`: retrieve → generate → verify | [`workflows.md`](workflows.md) |
+| Standard RAG | (default, both false) | LangGraph `StateGraph`: retrieve → generate → verify (or retrieve → abstain) | [`workflows.md`](workflows.md), [`retrieval.md`](retrieval.md) |
 | ReAct agent | `agent_mode: true` | LangGraph prebuilt ReAct agent + `ALL_TOOLS` | [`workflows.md`](workflows.md), [`agents.md`](agents.md) |
 | Multi-agent | `multi_agent_mode: true` | `OrchestratorAgent`: classify → route to specialist(s) → synthesize | [`agents.md`](agents.md) |
 

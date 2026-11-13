@@ -42,6 +42,11 @@ Cross-cutting decisions only — domain-internal choices stay in their domain do
 **Decision:** `OrchestratorAgent.classify_intent` makes a fast, low-token Groq call to label the query into one or more of `technical/labs/research/general`, then routes to matching specialist agent(s) in parallel, merging multi-domain results via a synthesis LLM call.
 **Consequence:** Classification itself can misroute (it's a best-effort LLM call with a hardcoded fallback to `general` on failure) — this is a soft-routing system, not a deterministic one. See [`AI/agents.md`](AI/index.md).
 
+### ADR-007: Cross-encoder reranking, relevance floor, cached BM25, contextual chunking
+**Context:** The ADR-005 hybrid never really ran (its BM25 half needed the uninstalled `rank_bm25`, so it silently degraded to dense-only), the only "reranking" was a BM25/recency/page-position heuristic that does not measure relevance, nothing could say "not in the documents", and follow-up questions were searched verbatim.
+**Decision:** One shared pipeline (`VENUAI/retrieval.py`): optional LLM query rewrite (FAST model) -> dense + own cached BM25 -> RRF -> cross-encoder rerank (`cross-encoder/ms-marco-MiniLM-L-6-v2`, configurable) -> relevance floor -> abstain graph node when nothing survives; contextual-chunk prefixes at ingest; configurable embedding model recorded in collection metadata. Every model-dependent step falls back to the previous behaviour if unavailable.
+**Consequence:** Offline benchmark (synthetic near-twin corpus): hit@1 0.36 -> 0.95, MRR 0.59 -> 0.97. Costs: ~one extra CPU model (~90 MB), up to one FAST LLM call per follow-up query and per chunk at upload (`CONTEXTUAL_CHUNKING=false` disables). The floor is calibrated on synthetic data and must be re-checked on real corpora. Supersedes the BM25 consequence in ADR-005. Details: [`AI/retrieval.md`](AI/retrieval.md).
+
 ## Workflow
 N/A — this document records decisions, it does not describe a runtime flow.
 
