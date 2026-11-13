@@ -42,6 +42,11 @@ Cross-cutting decisions only — domain-internal choices stay in their domain do
 **Decision:** `OrchestratorAgent.classify_intent` makes a fast, low-token Groq call to label the query into one or more of `technical/labs/research/general`, then routes to matching specialist agent(s) in parallel, merging multi-domain results via a synthesis LLM call.
 **Consequence:** Classification itself can misroute (it's a best-effort LLM call with a hardcoded fallback to `general` on failure) — this is a soft-routing system, not a deterministic one. See [`AI/agents.md`](AI/index.md).
 
+### ADR-007: Layered trust & safety on every answer path
+**Context:** `/query/stream` had no input guardrails, `validate_output` was dead code, grounding scores of 0.9/0.8/0.7 were hardcoded, verifier errors returned 500 or passed silently, and retrieved documents were pasted into the prompt as trusted text.
+**Decision:** One guarded pipeline for all paths: regex + Prompt Guard on input; ingest-time sanitising/scanning and prompt-time spotlighting with quarantine for documents (treated as untrusted data); quote-level `[n]` citations verified deterministically; fail-closed verification (`verified=false` + reason, scores `null` when unmeasured); output guardrails plus a `gpt-oss-safeguard-20b` policy classifier that fails open only with an explicit `safety_check="unavailable"`; trace-id error hygiene. Details in [`AI/trust-and-safety.md`](AI/trust-and-safety.md).
+**Consequence:** Extra small classifier calls per request and per ingest; response fields became nullable and gained `blocked`, `verified`, `citations`, `safety_check`. Frontends must not default missing scores to a made-up value. Supersedes the "`/query/stream` skips verification" note in ADR-002.
+
 ## Workflow
 N/A — this document records decisions, it does not describe a runtime flow.
 
