@@ -22,7 +22,7 @@ Before this existed, three call sites each reimplemented model-name fallback ind
 | `gateway.py` | `AIGateway.complete()` — the single call surface; bounded retries + backoff/jitter per model, a per-model in-memory circuit breaker, `AIServiceUnavailableError` when the whole chain fails |
 | `telemetry.py` | SQLite log (`VENUAI/data/model_routing_log.db`) of every call: task type, chain tried, model used, fallback count, latency, token counts, success/error — never logs message content |
 
-## Current Catalog and Behaviour (ADR-009)
+## Current Catalog and Behaviour (ADR-010)
 | Model | Capabilities | Context | Notes |
 |---|---|---|---|
 | `openai/gpt-oss-120b` | REASONING | 131,072 | Primary; `reasoning_effort` supported |
@@ -73,7 +73,7 @@ A `CompletionResult` (content, model_id, provider, token counts) or `AIServiceUn
 - `VENUAI/agents/orchestrator.py`, `VENUAI/agents/base_agent.py`, `VENUAI/verifier_agent.py`, `VENUAI/research_planner.py`, `VENUAI/agentic_rag.py`, `VENUAI/agents/deep_research_agent.py`, `VENUAI/agents/data_analyst_agent.py`, `VENUAI/agents/vision_agent.py` — all route their LLM calls through this gateway.
 
 ## Interactions with Other Services
-**Not covered by this gateway**: only the ReAct agent (LangGraph prebuilt needs a LangChain chat model); see "Current Catalog and Behaviour" above. `generate_node`, `fallback_kb_node` and `/query/stream` now go through the gateway (ADR-009).
+**Not covered by this gateway**: only the ReAct agent (LangGraph prebuilt needs a LangChain chat model); see "Current Catalog and Behaviour" above. `generate_node`, `fallback_kb_node` and `/query/stream` now go through the gateway (ADR-010).
 
 `GET /models` (Phase 4) exposes `model_registry.get_catalog()` read-only, `enabled` reflecting live provider configuration — backs the Research Workspace's "Agents & Models" panel (`chat-app/src/app/workspace/page.tsx`). Listing only, no runtime model-switching UI.
 

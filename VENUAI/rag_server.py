@@ -1019,6 +1019,7 @@ def generate_node(state: RAGGraphState) -> dict:
     llm = get_llm()
     res = llm.invoke(prompt_text)
     answer_text = res.content if hasattr(res, "content") else str(res)
+    answered_by = getattr(res, "model_id", None) or _primary_model_label()
 
     return {
         "answer": answer_text,

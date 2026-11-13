@@ -27,3 +27,4 @@ next-env.d.ts
 *.log
 *.db
 *.sqlite3
+VENUAI/evals/.judge_cache/

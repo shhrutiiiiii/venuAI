@@ -75,7 +75,7 @@ _CATALOG: List[ModelEntry] = [
         cost_tier="medium",
         latency_class="standard",
         reasoning_style="effort",
-        notes="Primary model (ADR-001, superseded default by ADR-009).",
+        notes="Primary model (ADR-001, superseded default by ADR-010).",
     ),
     ModelEntry(
         model_id="openai/gpt-oss-20b",
