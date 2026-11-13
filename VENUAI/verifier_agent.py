@@ -44,6 +44,7 @@ class VerificationResult:
     policy_flags: List[PolicyFlag] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     revised_answer: Optional[str] = None            # set if answer was rewritten
+    consistency_checked: bool = True                # False when the LLM consistency check could not run
 
 
 # ── VerifierAgent ───────────────────────────────────────────────────────────────
@@ -181,12 +182,13 @@ class VerifierAgent:
 
     # ── Consistency check ─────────────────────────────────────────────────────
 
-    def check_consistency(self, answer: str, question: str) -> bool:
+    def check_consistency(self, answer: str, question: str) -> Optional[bool]:
         """
         Use a fast Groq model to verify the answer actually addresses the question.
 
         Returns:
-            True if the answer is consistent with the question, False otherwise.
+            True/False if the check ran; None if it could not run (fail-closed: callers must
+            not treat None as a pass).
         """
         try:
             from VENUAI.ai_gateway.gateway import get_gateway
@@ -209,8 +211,7 @@ class VerifierAgent:
             return verdict.startswith("YES")
         except Exception as e:
             logger.warning(f"[VerifierAgent] check_consistency LLM call failed: {e}")
-            return True  # assume consistent on error (fail open) — this is now a real
-            # fallback for genuine failures, not the only code path ever reached.
+            return None  # could not check: report unknown, never assume consistent
 
     # ── Answer rewriting ──────────────────────────────────────────────────────
 
@@ -298,14 +299,17 @@ class VerifierAgent:
         is_consistent = self.check_consistency(answer, question)
 
         warnings: List[str] = []
+        consistency_checked = is_consistent is not None
+        if not consistency_checked:
+            warnings.append("Consistency check unavailable (could not run).")
         if grounding_score < 0.5:
             warnings.append(f"Low grounding score: {grounding_score:.2f}")
         if policy_flags:
             warnings.extend([f"Policy flag: {f.value}" for f in policy_flags])
-        if not is_consistent:
+        if is_consistent is False:
             warnings.append("Answer may not address the question.")
 
-        needs_rewrite = bool(policy_flags) or grounding_score < 0.5 or not is_consistent
+        needs_rewrite = bool(policy_flags) or grounding_score < 0.5 or is_consistent is False
         revised_answer = None
 
         if needs_rewrite:
@@ -319,6 +323,7 @@ class VerifierAgent:
             policy_flags=policy_flags,
             warnings=warnings,
             revised_answer=revised_answer,
+            consistency_checked=consistency_checked,
         )
 
         logger.info(

@@ -252,16 +252,27 @@ class QueryResponse(BaseModel):
     model: str
     chunks_retrieved: int
     # New verification & quality fields
-    grounding_score: float = 0.0
-    hallucination_score: float = 0.0
+    # None = not measured (never a made-up number); see verified / verification_reason.
+    grounding_score: Optional[float] = None
+    hallucination_score: Optional[float] = None
     verification_flags: List[str] = []
     annotated_answer: Optional[str] = None
-    # Claim-level evidence verification fields — all default to 0/False so
-    # older clients that don't read them see no behavior change.
-    evidence_coverage: float = 0.0
-    unsupported_claim_count: int = 0
-    contradicted_claim_count: int = 0
+    # Claim-level evidence verification fields (None = not measured).
+    evidence_coverage: Optional[float] = None
+    unsupported_claim_count: Optional[int] = None
+    contradicted_claim_count: Optional[int] = None
     critique_passed: bool = False
+    # Trust & safety (additive)
+    blocked: bool = False
+    block_reason: Optional[str] = None
+    verified: bool = False
+    verification_reason: Optional[str] = None
+    citations: List[dict] = []
+    safety_check: Optional[str] = None          # passed | flagged | unavailable | disabled
+    answer_basis: Optional[str] = None          # uploaded_documents | builtin_knowledge_base | none
+    answer_basis_notice: Optional[str] = None
+    quarantined_chunks: int = 0
+    trace_id: Optional[str] = None
 
 
 class DocumentInfo(BaseModel):
@@ -669,6 +680,9 @@ async def upload_document(
         chunk.metadata["owner_id"]    = current_user.id
         chunk.metadata["tenant_id"]   = current_user.tenant_id
 
+    # Indirect-injection defence: sanitise + scan chunks, store injection_risk in metadata
+    from VENUAI.doc_sanitizer import sanitize_and_scan_chunks; sanitize_and_scan_chunks(chunks)
+
     # ── Document Intelligence: auto-tag the document ─────────────────────────────
     from VENUAI.doc_intelligence import DocumentIntelligence
     full_text = " ".join(c.page_content for c in chunks[:50])  # first 50 chunks
@@ -792,6 +806,17 @@ class RAGGraphState(TypedDict):
     # code already depends on — this is additive detail for the explorer
     # UI, not a replacement.
     evidence_claims: List[dict]
+    # Trust & safety
+    user_id: str
+    prompt_docs: List[Document]
+    quarantined: int
+    answer_basis: str
+    verified: bool
+    verification_reason: Optional[str]
+    citations: List[dict]
+    safety_check: str
+    blocked: bool
+    block_reason: Optional[str]
 
 
 def get_visible_doc_ids(current_user: AuthenticatedUser) -> Optional[List[str]]:
@@ -890,48 +915,24 @@ def retrieve_node(state: RAGGraphState) -> dict:
     return {"documents": retrieved_docs}
 
 
-def generate_node(state: RAGGraphState) -> dict:
-    """
-    Generate an answer using Context Engineering for optimal prompt quality.
-    Integrates: rank_chunks, compress_history, build_drdo_prompt, semantic_memories.
-    """
-    from VENUAI.context_engineer import (
-        ContextBudget, rank_chunks, compress_history, build_drdo_prompt
-    )
+def _kb_notice() -> str:
+    from VENUAI.answer_pipeline import KB_NOTICE
+    return KB_NOTICE
 
-    question = state["question"]
-    docs     = state.get("documents", [])
-    history  = state.get("history") or []
-    sem_mems = state.get("semantic_memories", [])
 
-    ranked_docs = rank_chunks(docs, question)
-    if not ranked_docs:
-        kb_data = load_prefilled_kb()
-        if kb_data:
-            kb_text = json.dumps(kb_data, indent=2, ensure_ascii=False)[:8000]
-            fake_doc = Document(
-                page_content=f"DRDO Master Knowledge Base:\n{kb_text}",
-                metadata={"filename": "DRDO Master Knowledge Base (Preloaded JSON)", "page": 0}
-            )
-            ranked_docs = [fake_doc]
+def _kb_fallback_docs() -> List[Document]:
+    """Built-in KB as a clearly-labelled document, or [] if no KB is available."""
+    from VENUAI.answer_pipeline import kb_document
+    kb_data = load_prefilled_kb()
+    if not kb_data:
+        return []
+    return [kb_document(json.dumps(kb_data, indent=2, ensure_ascii=False)[:8000])]
 
-    compressed_history = compress_history(history, max_turns=6)
-    budget             = ContextBudget()
-    prompt_text        = build_drdo_prompt(
-        question=question,
-        ranked_docs=ranked_docs,
-        compressed_history=compressed_history,
-        budget=budget,
-        semantic_memories=sem_mems or [],
-    )
 
-    llm = get_llm()
-    res = llm.invoke(prompt_text)
-    answer_text = res.content if hasattr(res, "content") else str(res)
-
+def _sources_from_docs(docs: List[Document]) -> List[QuerySource]:
     seen_sources: set = set()
     sources: List[QuerySource] = []
-    for doc in ranked_docs:
+    for doc in docs:
         m = doc.metadata
         key = (m.get("filename", "Unknown"), m.get("page", 0))
         if key not in seen_sources:
@@ -941,98 +942,139 @@ def generate_node(state: RAGGraphState) -> dict:
                 page=m.get("page", 0) + 1,
                 chunk_preview=doc.page_content[:120].strip() + "…",
             ))
+    return sources
+
+
+def generate_node(state: RAGGraphState) -> dict:
+    """
+    Generate an answer using Context Engineering for optimal prompt quality.
+    Integrates: rank_chunks, compress_history, build_drdo_prompt, semantic_memories.
+    The raw answer (still carrying the <citations> block) is post-processed in verify_node.
+    """
+    from VENUAI.context_engineer import (
+        ContextBudget, rank_chunks, compress_history, build_drdo_prompt
+    )
+    from VENUAI.answer_pipeline import ANSWER_BASIS_DOCUMENTS, ANSWER_BASIS_KB, ANSWER_BASIS_NONE
+
+    question = state["question"]
+    docs     = state.get("documents", [])
+    history  = state.get("history") or []
+    sem_mems = state.get("semantic_memories", [])
+
+    ranked_docs = rank_chunks(docs, question)
+    answer_basis = ANSWER_BASIS_DOCUMENTS if ranked_docs else ANSWER_BASIS_NONE
+    if not ranked_docs:
+        ranked_docs = _kb_fallback_docs()
+        if ranked_docs:
+            answer_basis = ANSWER_BASIS_KB
+
+    compressed_history = compress_history(history, max_turns=6)
+    budget             = ContextBudget()
+    prompt_info: dict  = {}
+    prompt_text        = build_drdo_prompt(
+        question=question,
+        ranked_docs=ranked_docs,
+        compressed_history=compressed_history,
+        budget=budget,
+        semantic_memories=sem_mems or [],
+        info=prompt_info,
+    )
+    prompt_docs = prompt_info.get("used_docs", [])
+
+    llm = get_llm()
+    res = llm.invoke(prompt_text)
+    answer_text = res.content if hasattr(res, "content") else str(res)
 
     return {
         "answer": answer_text,
-        "sources": sources,
-        "documents": ranked_docs,
+        "sources": _sources_from_docs(prompt_docs),
+        "documents": prompt_docs,
+        "prompt_docs": prompt_docs,
+        "quarantined": prompt_info.get("quarantined", 0),
+        "answer_basis": answer_basis,
         "model_used": "groq/compound (Groq / LangGraph + ContextEngineer)",
     }
 
 
+def _postprocess_answer(raw_answer: str, question: str, prompt_docs: List[Document],
+                        user_id: str, answer_basis: str, light: bool = False) -> dict:
+    """
+    Shared tail for every answer path: split + verify citations, verify the answer
+    (fail-closed), then output guardrails + policy classifier. Returns graph-state fields.
+    """
+    from VENUAI.answer_pipeline import (
+        split_citations, run_verification, apply_output_safety, ANSWER_BASIS_KB, KB_NOTICE,
+    )
+    from VENUAI.grounded_citations import verify_citations
+
+    clean, quotes = split_citations(raw_answer)
+    ver = run_verification(clean, question, prompt_docs, light=light)
+    final_answer = ver.pop("final_answer")
+    citations = verify_citations(final_answer, quotes, prompt_docs)
+    safe = apply_output_safety(final_answer, ver.get("grounding_score"), user_id=user_id)
+    if safe["blocked"]:
+        ver["verified"] = False
+        ver["verification_reason"] = "answer withheld by output safety policy"
+        citations = []
+    result = {
+        **ver,
+        "answer": safe["answer"],
+        "annotated_answer": safe["answer"] if safe["blocked"] else (ver.get("annotated_answer") or safe["answer"]),
+        "citations": citations,
+        "safety_check": safe["safety_check"],
+        "blocked": safe["blocked"],
+        "block_reason": safe["block_reason"],
+    }
+    if answer_basis == ANSWER_BASIS_KB and not safe["blocked"]:
+        result["answer"] = f"_{KB_NOTICE}_\n\n{result['answer']}"
+        result["annotated_answer"] = f"_{KB_NOTICE}_\n\n{result['annotated_answer']}"
+    return result
+
+
 def verify_node(state: RAGGraphState) -> dict:
     """
-    Run VerifierAgent + HallucinationDetector on the generated answer, plus
-    the claim-level VerificationPipeline (citation + contradiction + critic —
-    see VENUAI/verification_pipeline.py). Updates state with
-    grounding_score, hallucination_score, verification_flags, and the new
-    claim-level fields.
+    Strip + verify quote-level citations, run VerifierAgent + HallucinationDetector +
+    the claim-level VerificationPipeline, then output guardrails. Fail-closed: a verifier
+    error yields verified=False with a reason, never a 500 and never a silent pass.
     """
-    from VENUAI.verifier_agent import get_verifier
-    from VENUAI.hallucination_detector import get_hallucination_detector
-    from VENUAI.verification_pipeline import get_verification_pipeline
-    from VENUAI import evidence_store
-    from groq import Groq as _Groq
-
-    answer   = state.get("answer", "")
-    question = state.get("question", "")
-    docs     = state.get("documents", [])
-
-    verifier = get_verifier(_Groq(api_key=GROQ_API_KEY))
-    v_result = verifier.verify(answer, question, docs)
-    final_answer = v_result.revised_answer if v_result.revised_answer else answer
-
-    annotated, hall_score, _ = get_hallucination_detector().analyze(final_answer, docs)
-    flags = [f.value for f in v_result.policy_flags]
-
-    pipeline_result = get_verification_pipeline().run(question, final_answer, docs)
-
-    return {
-        "answer":             final_answer,
-        "annotated_answer":   annotated,
-        "grounding_score":    v_result.grounding_score,
-        "hallucination_score":hall_score,
-        "verification_flags": flags,
-        "evidence_coverage":  pipeline_result.evidence_graph.evidence_coverage,
-        "unsupported_claim_count": pipeline_result.critique.unsupported_claim_count,
-        "contradicted_claim_count": pipeline_result.critique.contradicted_claim_count,
-        "critique_passed":   pipeline_result.critique.passed,
-        "evidence_claims":   evidence_store.serialize_claims(pipeline_result.evidence_graph.claims),
-    }
+    return _postprocess_answer(
+        state.get("answer", ""), state.get("question", ""),
+        state.get("prompt_docs") or state.get("documents", []),
+        state.get("user_id") or "user", state.get("answer_basis") or "uploaded_documents",
+    )
 
 
 def fallback_kb_node(state: RAGGraphState) -> dict:
-    kb_data = load_prefilled_kb()
-    if not kb_data:
+    """No uploaded documents at all: answer from the built-in KB, labelled as such, and
+    verify against the KB text actually used (no fixed scores)."""
+    from VENUAI.context_engineer import ContextBudget, build_drdo_prompt
+    from VENUAI.answer_pipeline import ANSWER_BASIS_KB
+
+    kb_docs = _kb_fallback_docs()
+    if not kb_docs:
         raise HTTPException(status_code=404, detail="No documents in knowledge base.")
 
-    kb_text = json.dumps(kb_data, indent=2, ensure_ascii=False)
+    prompt_info: dict = {}
+    prompt_text = build_drdo_prompt(
+        question=state["question"], ranked_docs=kb_docs, compressed_history="",
+        budget=ContextBudget(), semantic_memories=state.get("semantic_memories") or [],
+        info=prompt_info,
+    )
+    prompt_docs = prompt_info.get("used_docs", kb_docs)
     llm = get_llm()
-    prompt_text = f"""You are VenuAI, an intelligent research assistant for DRDO.
-Answer the user's question using the DRDO Knowledge Base below.
-Format with ### headings, Markdown tables, bullet points, and **bold** key terms.
-
---- DRDO KNOWLEDGE BASE ---
-{kb_text[:8000]}
---- END ---
-
-Question: {state['question']}
-Answer:"""
-
     res = llm.invoke(prompt_text)
     ans_text = res.content if hasattr(res, 'content') else str(res)
-    return {
-        "answer": ans_text,
-        "annotated_answer": ans_text,
-        "grounding_score": 0.9,
-        "hallucination_score": 0.0,
-        "verification_flags": [],
-        "sources": [QuerySource(
-            document="DRDO Master Knowledge Base (Preloaded JSON)",
-            page=1,
-            chunk_preview="DRDO laboratories directory, weapons platforms, and technology clusters.",
-        )],
+    out = _postprocess_answer(ans_text, state["question"], prompt_docs,
+                              state.get("user_id") or "user", ANSWER_BASIS_KB)
+    out.update({
+        "sources": _sources_from_docs(prompt_docs),
+        "documents": prompt_docs,
+        "prompt_docs": prompt_docs,
+        "quarantined": prompt_info.get("quarantined", 0),
+        "answer_basis": ANSWER_BASIS_KB,
         "model_used": "groq/compound (Preloaded KB / LangGraph Fallback)",
-        # This path doesn't run VerificationPipeline — there is no retrieved
-        # Document list to build claim-level Evidence from here, only the
-        # raw preloaded KB JSON. Reporting 0/False rather than a fabricated
-        # coverage number is the honest default for "not evaluated."
-        "evidence_coverage": 0.0,
-        "unsupported_claim_count": 0,
-        "contradicted_claim_count": 0,
-        "critique_passed": False,
-        "evidence_claims": [],
-    }
+    })
+    return out
 
 
 def route_query_node(state: RAGGraphState) -> str:
@@ -1099,10 +1141,15 @@ def query_knowledge_base(
             sources=[],
             model="DRDO Defence Guardrails Policy",
             chunks_retrieved=0,
-            grounding_score=0.0,
-            hallucination_score=0.0,
+            grounding_score=None,
+            hallucination_score=None,
             verification_flags=[f"GUARDRAIL_TRIGGERED: {g_res.violation_type}"],
             annotated_answer=g_res.sanitized_input_or_output,
+            blocked=True,
+            block_reason=g_res.block_reason or g_res.violation_type,
+            verified=False,
+            verification_reason="request blocked by input guardrails",
+            trace_id=trace.request_id,
         )
 
     t_start = _time.time()
@@ -1140,7 +1187,11 @@ def query_knowledge_base(
             # QuerySource summaries). Best-effort: a verification failure
             # must not turn a successful multi-agent answer into a 500.
             from VENUAI import evidence_store
-            evidence_coverage, unsupported_count, contradicted_count, critique_passed = 0.0, 0, 0, False
+            evidence_coverage, unsupported_count, contradicted_count, critique_passed = None, None, None, False
+            from VENUAI.answer_pipeline import run_verification, apply_output_safety, ANSWER_BASIS_DOCUMENTS, ANSWER_BASIS_NONE
+            ma_ver = run_verification(agent_result.answer, req.question, agent_result.documents, light=True)
+            ma_safe = apply_output_safety(ma_ver.pop("final_answer"), ma_ver.get("grounding_score"), user_id=current_user.id)
+            agent_result.answer = ma_safe["answer"]
             try:
                 from VENUAI.verification_pipeline import get_verification_pipeline
                 pipeline_result = get_verification_pipeline().run(
@@ -1159,7 +1210,7 @@ def query_knowledge_base(
             except Exception as verify_err:
                 logger.warning(f"[multi_agent] VerificationPipeline skipped: {verify_err}")
 
-            trace.log_summary(success=True, extra={"stage": "multi_agent", "confidence": agent_result.confidence})
+            trace.log_summary(success=True, extra={"stage": "multi_agent", "retrieval_coverage": agent_result.retrieval_coverage})
             t_end = _time.time()
             background_tasks.add_task(
                 mm.save_turn, req.session_id, req.user_id or "anonymous",
@@ -1170,7 +1221,8 @@ def query_knowledge_base(
                 get_analytics().log_query,
                 req.session_id, req.user_id or "anonymous", req.question,
                 len(agent_result.answer), (t_end - t_start) * 1000,
-                agent_result.confidence, 0.0, agent_used, tools_called, None
+                ma_ver.get("grounding_score") or 0.0, ma_ver.get("hallucination_score") or 0.0,
+                agent_used, tools_called, None
             )
             return QueryResponse(
                 answer=agent_result.answer,
@@ -1179,14 +1231,20 @@ def query_knowledge_base(
                          for s in agent_result.sources],
                 model=agent_result.agent_name,
                 chunks_retrieved=len(agent_result.sources),
-                grounding_score=agent_result.confidence,
-                hallucination_score=0.0,
-                verification_flags=[],
+                grounding_score=ma_ver.get("grounding_score"),
+                hallucination_score=ma_ver.get("hallucination_score"),
+                verification_flags=ma_ver.get("verification_flags", []),
                 annotated_answer=agent_result.answer,
                 evidence_coverage=evidence_coverage,
                 unsupported_claim_count=unsupported_count,
                 contradicted_claim_count=contradicted_count,
                 critique_passed=critique_passed,
+                blocked=ma_safe["blocked"], block_reason=ma_safe["block_reason"],
+                verified=ma_ver["verified"] and not ma_safe["blocked"],
+                verification_reason=ma_ver.get("verification_reason"),
+                safety_check=ma_safe["safety_check"],
+                answer_basis=ANSWER_BASIS_DOCUMENTS if agent_result.documents else ANSWER_BASIS_NONE,
+                trace_id=trace.request_id,
             )
 
         # Mode: ReAct Agent
@@ -1244,8 +1302,12 @@ def query_knowledge_base(
             # decision as standard RAG's KB-fallback path — see
             # Documents/AI/evidence-explorer.md Design Principle 1), not a
             # reason to skip.
-            evidence_coverage, unsupported_count, contradicted_count, critique_passed = 0.0, 0, 0, False
+            evidence_coverage, unsupported_count, contradicted_count, critique_passed = None, None, None, False
             from VENUAI import evidence_store
+            from VENUAI.answer_pipeline import run_verification, apply_output_safety, ANSWER_BASIS_DOCUMENTS, ANSWER_BASIS_NONE
+            react_ver = run_verification(answer_text, req.question, collected_docs, light=True)
+            react_safe = apply_output_safety(react_ver.pop("final_answer"), react_ver.get("grounding_score"), user_id=current_user.id)
+            answer_text = react_safe["answer"]
             try:
                 from VENUAI.verification_pipeline import get_verification_pipeline
                 pipeline_result = get_verification_pipeline().run(req.question, answer_text, collected_docs)
@@ -1277,21 +1339,28 @@ def query_knowledge_base(
                 get_analytics().log_query,
                 req.session_id, req.user_id or "anonymous", req.question,
                 len(answer_text), (t_end - t_start) * 1000,
-                0.7, 0.0, agent_used, tools_called, None
+                react_ver.get("grounding_score") or 0.0, react_ver.get("hallucination_score") or 0.0,
+                agent_used, tools_called, None
             )
             return QueryResponse(
                 answer=answer_text,
                 sources=react_sources,
                 model="ReAct Agent (LangGraph prebuilt)",
                 chunks_retrieved=len(collected_docs),
-                grounding_score=0.7,
-                hallucination_score=0.0,
-                verification_flags=[],
+                grounding_score=react_ver.get("grounding_score"),
+                hallucination_score=react_ver.get("hallucination_score"),
+                verification_flags=react_ver.get("verification_flags", []),
                 annotated_answer=answer_text,
                 evidence_coverage=evidence_coverage,
                 unsupported_claim_count=unsupported_count,
                 contradicted_claim_count=contradicted_count,
                 critique_passed=critique_passed,
+                blocked=react_safe["blocked"], block_reason=react_safe["block_reason"],
+                verified=react_ver["verified"] and not react_safe["blocked"],
+                verification_reason=react_ver.get("verification_reason"),
+                safety_check=react_safe["safety_check"],
+                answer_basis=ANSWER_BASIS_DOCUMENTS if collected_docs else ANSWER_BASIS_NONE,
+                trace_id=trace.request_id,
             )
 
         # Mode: Standard RAG (LangGraph)
@@ -1305,16 +1374,17 @@ def query_knowledge_base(
             "model_used":        "",
             "working_memory":    working_memory,
             "semantic_memories": semantic_memories,
-            "grounding_score":   0.0,
-            "hallucination_score": 0.0,
+            "grounding_score":   None,
+            "hallucination_score": None,
             "verification_flags":  [],
             "annotated_answer":    "",
             "allowed_doc_ids":     get_visible_doc_ids(current_user),
-            "evidence_coverage":   0.0,
-            "unsupported_claim_count": 0,
-            "contradicted_claim_count": 0,
+            "evidence_coverage":   None,
+            "unsupported_claim_count": None,
+            "contradicted_claim_count": None,
             "critique_passed":     False,
             "evidence_claims":     [],
+            "user_id":             current_user.id,
         })
         t_end = _time.time()
         final_answer = final_state.get("answer", "No response generated.")
@@ -1327,8 +1397,8 @@ def query_knowledge_base(
         background_tasks.add_task(
             _save_evidence_record,
             current_user.id, current_user.tenant_id, req.question, final_answer, "query",
-            final_state.get("evidence_claims", []), final_state.get("evidence_coverage", 0.0),
-            final_state.get("unsupported_claim_count", 0), final_state.get("contradicted_claim_count", 0),
+            final_state.get("evidence_claims", []), final_state.get("evidence_coverage") or 0.0,
+            final_state.get("unsupported_claim_count") or 0, final_state.get("contradicted_claim_count") or 0,
             final_state.get("critique_passed", False),
         )
         from VENUAI.analytics import get_analytics
@@ -1336,8 +1406,8 @@ def query_knowledge_base(
             get_analytics().log_query,
             req.session_id, req.user_id or "anonymous", req.question,
             len(final_answer), (t_end - t_start) * 1000,
-            final_state.get("grounding_score", 0.0),
-            final_state.get("hallucination_score", 0.0),
+            final_state.get("grounding_score") or 0.0,
+            final_state.get("hallucination_score") or 0.0,
             agent_used, tools_called, error_str
         )
 
@@ -1351,23 +1421,39 @@ def query_knowledge_base(
             sources=final_state.get("sources", []),
             model=final_state.get("model_used", "LangGraph Workflow"),
             chunks_retrieved=len(final_state.get("documents", [])),
-            grounding_score=final_state.get("grounding_score", 0.0),
-            hallucination_score=final_state.get("hallucination_score", 0.0),
+            grounding_score=final_state.get("grounding_score"),
+            hallucination_score=final_state.get("hallucination_score"),
             verification_flags=final_state.get("verification_flags", []),
             annotated_answer=final_state.get("annotated_answer") or final_answer,
-            evidence_coverage=final_state.get("evidence_coverage", 0.0),
-            unsupported_claim_count=final_state.get("unsupported_claim_count", 0),
-            contradicted_claim_count=final_state.get("contradicted_claim_count", 0),
+            evidence_coverage=final_state.get("evidence_coverage"),
+            unsupported_claim_count=final_state.get("unsupported_claim_count"),
+            contradicted_claim_count=final_state.get("contradicted_claim_count"),
             critique_passed=final_state.get("critique_passed", False),
+            blocked=final_state.get("blocked", False),
+            block_reason=final_state.get("block_reason"),
+            verified=final_state.get("verified", False),
+            verification_reason=final_state.get("verification_reason"),
+            citations=final_state.get("citations", []),
+            safety_check=final_state.get("safety_check"),
+            answer_basis=final_state.get("answer_basis"),
+            answer_basis_notice=(_kb_notice() if final_state.get("answer_basis") == "builtin_knowledge_base" else None),
+            quarantined_chunks=final_state.get("quarantined", 0),
+            trace_id=trace.request_id,
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        trace.log_summary(success=False, extra={"stage": "exception", "error": str(e)})
-        error_str = str(e)
-        logger.error(f"Query execution error: {e}")
-        raise HTTPException(status_code=500, detail=f"Query execution failed: {str(e)}")
+        # Error hygiene: full detail is logged server-side under a trace id; the client gets a
+        # generic message plus that id (never str(e)).
+        trace.log_summary(success=False, extra={"stage": "exception", "error_type": type(e).__name__})
+        error_str = type(e).__name__
+        logger.exception(f"Query execution error [trace_id={trace.request_id}]")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Query execution failed. Reference trace ID: {trace.request_id}",
+            headers={"X-Trace-Id": trace.request_id},
+        )
 
 
 @app.post("/query/stream")
@@ -1388,6 +1474,37 @@ async def query_stream(
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
     req.user_id = current_user.id
+
+    # Input guardrails (same engine as /query). A block emits ONE SSE event and ends.
+    from VENUAI.guardrails import get_guardrail_engine
+    from VENUAI.observability import new_request_id
+    trace_id = new_request_id()
+    g_res = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: get_guardrail_engine().validate_input(req.question, user_id=req.user_id or "anonymous")
+    )
+    if not g_res.passed:
+        blocked_event = {
+            "blocked": True,
+            "block_reason": g_res.block_reason or g_res.violation_type,
+            "violation_type": g_res.violation_type,
+            "answer": g_res.sanitized_input_or_output,
+            "done": True,
+            "sources": [],
+            "citations": [],
+            "grounding_score": None,
+            "hallucination_score": None,
+            "verified": False,
+            "verification_reason": "request blocked by input guardrails",
+            "trace_id": trace_id,
+        }
+
+        async def blocked_generator():
+            yield f"data: {json.dumps(blocked_event)}\n\n"
+
+        return StreamingResponse(
+            blocked_generator(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Trace-Id": trace_id},
+        )
 
     async def event_generator():
         try:
@@ -1416,23 +1533,24 @@ async def query_stream(
                 logger.warning(f"[stream] multimodal region retrieval skipped: {region_err}")
 
             ranked_docs = rank_chunks(docs, req.question)
+            answer_basis = "uploaded_documents" if ranked_docs else "none"
             if not ranked_docs:
-                kb_data = load_prefilled_kb()
-                if kb_data:
-                    kb_text = json.dumps(kb_data, indent=2, ensure_ascii=False)[:8000]
-                    fake_doc = Document(
-                        page_content=f"DRDO Master Knowledge Base:\n{kb_text}",
-                        metadata={"filename": "DRDO Master Knowledge Base (Preloaded JSON)", "page": 0}
-                    )
-                    ranked_docs = [fake_doc]
+                ranked_docs = _kb_fallback_docs()
+                if ranked_docs:
+                    answer_basis = "builtin_knowledge_base"
 
+            prompt_info: dict = {}
             prompt_text = build_drdo_prompt(
                 question=req.question,
                 ranked_docs=ranked_docs,
                 compressed_history=compress_history(effective_history),
                 budget=ContextBudget(),
                 semantic_memories=mem_ctx.get("semantic", []),
+                info=prompt_info,
             )
+            prompt_docs = prompt_info.get("used_docs", [])
+            from VENUAI.grounded_citations import CitationStreamFilter
+            cite_filter = CitationStreamFilter()
 
             stream_client = _Groq(api_key=GROQ_API_KEY)
             full_answer = ""
@@ -1447,35 +1565,64 @@ async def query_stream(
                 delta = chunk.choices[0].delta.content or ""
                 if delta:
                     full_answer += delta
-                    yield f'data: {{"token": {json.dumps(delta)}}}\n\n'
+                    visible = cite_filter.feed(delta)   # hides the trailing <citations> block
+                    if visible:
+                        yield f'data: {{"token": {json.dumps(visible)}}}\n\n'
                     await asyncio.sleep(0)
+            tail = cite_filter.flush()
+            if tail:
+                yield f'data: {{"token": {json.dumps(tail)}}}\n\n'
 
-            sources_list = []
-            seen: set = set()
-            for doc in ranked_docs:
-                m = doc.metadata
-                key = (m.get("filename", "Unknown"), m.get("page", 0))
-                if key not in seen:
-                    seen.add(key)
-                    sources_list.append({"document": m.get("filename", "Unknown"),
-                                         "page": m.get("page", 0) + 1,
-                                         "chunk_preview": doc.page_content[:120].strip() + "…"})
+            sources_list = [
+                {"document": q.document, "page": q.page, "chunk_preview": q.chunk_preview}
+                for q in _sources_from_docs(prompt_docs)
+            ]
 
-            yield f'data: {{"done": true, "sources": {json.dumps(sources_list)}, "grounding_score": 0.8}}\n\n'
+            # Real verification after the final chunk (no hardcoded score): citations, grounding,
+            # output guardrails. Runs in a worker thread (blocking LLM/NLI calls).
+            post = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: _postprocess_answer(
+                    full_answer, req.question, prompt_docs, req.user_id or "user", answer_basis,
+                )
+            )
+            done_event = {
+                "done": True,
+                "sources": sources_list,
+                "answer": post["answer"],            # final, citation-block-free (replaces streamed text)
+                "citations": post["citations"],
+                "grounding_score": post.get("grounding_score"),
+                "hallucination_score": post.get("hallucination_score"),
+                "verification_flags": post.get("verification_flags", []),
+                "verified": post.get("verified", False),
+                "verification_reason": post.get("verification_reason"),
+                "evidence_coverage": post.get("evidence_coverage"),
+                "unsupported_claim_count": post.get("unsupported_claim_count"),
+                "contradicted_claim_count": post.get("contradicted_claim_count"),
+                "critique_passed": post.get("critique_passed", False),
+                "safety_check": post.get("safety_check"),
+                "blocked": post.get("blocked", False),
+                "block_reason": post.get("block_reason"),
+                "answer_basis": answer_basis,
+                "answer_basis_notice": _kb_notice() if answer_basis == "builtin_knowledge_base" else None,
+                "quarantined_chunks": prompt_info.get("quarantined", 0),
+                "trace_id": trace_id,
+            }
+            yield f"data: {json.dumps(done_event)}\n\n"
 
             await asyncio.get_event_loop().run_in_executor(
                 None, lambda: mm.save_turn(
-                    req.session_id, req.user_id or "anonymous", req.question, full_answer
+                    req.session_id, req.user_id or "anonymous", req.question, post["answer"]
                 )
             )
         except Exception as e:
-            logger.error(f"[stream] {e}")
-            yield f'data: {{"error": {json.dumps(str(e))}}}\n\n'
+            # Error hygiene: detail goes to the log under the trace id, not to the client.
+            logger.exception(f"[stream] error [trace_id={trace_id}]")
+            yield f"data: {json.dumps({'error': f'Stream failed. Reference trace ID: {trace_id}', 'trace_id': trace_id})}\n\n"
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Trace-Id": trace_id},
     )
 
 
@@ -1501,6 +1648,9 @@ class ResearchResponse(BaseModel):
     truncated: bool
     graph_entities_extracted: int = 0
     graph_relationships_extracted: int = 0
+    blocked: bool = False
+    block_reason: Optional[str] = None
+    safety_check: Optional[str] = None
 
 
 @app.post("/research", response_model=ResearchResponse)
@@ -1530,7 +1680,11 @@ def run_deep_research(
     ge = get_guardrail_engine()
     g_res = ge.validate_input(req.question, user_id=current_user.id)
     if not g_res.passed:
-        raise HTTPException(status_code=400, detail=f"Guardrail triggered: {g_res.violation_type}")
+        raise HTTPException(status_code=400, detail={
+            "blocked": True,
+            "block_reason": g_res.block_reason or g_res.violation_type,
+            "message": f"Guardrail triggered: {g_res.violation_type}",
+        })
 
     research_id = uuid.uuid4().hex[:12]
     allowed_doc_ids = get_visible_doc_ids(current_user)
@@ -1538,6 +1692,13 @@ def run_deep_research(
     result = DeepResearchAgent().research(
         req.question, _Groq(api_key=GROQ_API_KEY), allowed_doc_ids=allowed_doc_ids
     )
+
+    # Output guardrails + policy classifier on the synthesized answer (frozen dataclass -> replace).
+    import dataclasses
+    from VENUAI.answer_pipeline import apply_output_safety
+    research_safe = apply_output_safety(result.synthesized_answer, None, user_id=current_user.id)
+    if research_safe["blocked"] or research_safe["answer"] != result.synthesized_answer:
+        result = dataclasses.replace(result, synthesized_answer=research_safe["answer"])
 
     mm = get_memory_manager()
     mm.save_research_finding(
@@ -1605,6 +1766,9 @@ def run_deep_research(
         truncated=result.truncated,
         graph_entities_extracted=graph_entity_count,
         graph_relationships_extracted=graph_relationship_count,
+        blocked=research_safe["blocked"],
+        block_reason=research_safe["block_reason"],
+        safety_check=research_safe["safety_check"],
     )
 
 

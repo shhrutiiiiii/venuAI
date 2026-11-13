@@ -545,6 +545,10 @@ def seed_demo_users() -> None:
     keeps working end-to-end against *real* auth — hashed passwords, real
     JWTs — rather than being backed by a client-side mock.
     """
+    # SEED_DEMO_USER (default true for local/dev). Set SEED_DEMO_USER=false in production so
+    # no well-known demo@chat.com / admin@chat.com credentials exist.
+    if os.getenv("SEED_DEMO_USER", "true").strip().lower() in ("0", "false", "no", "off"):
+        return
     with _get_conn() as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
     if count > 0:

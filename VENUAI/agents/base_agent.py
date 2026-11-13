@@ -31,7 +31,11 @@ class AgentResult:
     agent_name: str
     answer: str
     sources: List[QuerySource] = field(default_factory=list)
-    confidence: float = 0.0     # 0.0 → 1.0 (grounding score from VerifierAgent)
+    # DEPRECATED alias of retrieval_coverage (kept so old callers/tests keep working). It was never a
+    # grounding/confidence measure; real grounding is computed by answer_pipeline.run_verification.
+    confidence: float = 0.0
+    # Fraction of top_k slots filled by retrieval (a retrieval signal, NOT answer correctness).
+    retrieval_coverage: Optional[float] = None
     reasoning: str = ""         # brief note on why this agent was chosen / what it did
     # Phase 5 — Evidence Explorer integration for multi-agent mode
     # (VENUAI/evidence_store.py). The real retrieved Document objects
@@ -40,6 +44,12 @@ class AgentResult:
     # page_content to build real Evidence/Claim objects from, which
     # QuerySource's truncated chunk_preview can't provide.
     documents: List[Document] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.retrieval_coverage is None:
+            self.retrieval_coverage = self.confidence
+        else:
+            self.confidence = self.retrieval_coverage
 
 
 # ── BaseSpecialistAgent ─────────────────────────────────────────────────────────
@@ -199,14 +209,14 @@ class BaseSpecialistAgent:
                     chunk_preview=doc.page_content[:120].strip() + "…",
                 ))
 
-        # Simple grounding estimate: fraction of docs that contributed content
-        confidence = min(1.0, len(docs) / max(self.top_k, 1))
+        # Retrieval coverage (fraction of top_k filled) - NOT a grounding/confidence score.
+        coverage = min(1.0, len(docs) / max(self.top_k, 1))
 
         return AgentResult(
             agent_name=self.name,
             answer=answer,
             sources=sources,
-            confidence=round(confidence, 2),
+            retrieval_coverage=round(coverage, 2),
             reasoning=f"{self.name} handled this query (domain: {self.domain}).",
             documents=docs,
         )
