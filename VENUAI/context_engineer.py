@@ -154,6 +154,24 @@ def rank_chunks(docs: List[Document], query: str) -> List[Document]:
     if not docs:
         return docs
 
+    # Docs from VENUAI.retrieval.retrieve_documents carry a real relevance
+    # score (cross-encoder, or hybrid-fusion fallback). That order is
+    # authoritative; the old BM25/recency/page heuristic is only a minor
+    # tie-break there, and the full ranking for unscored docs.
+    heur = _heuristic_scores(docs, query)
+    if all("retrieval_score" in (d.metadata or {}) for d in docs):
+        order = sorted(
+            range(len(docs)),
+            key=lambda i: (docs[i].metadata["retrieval_score"], heur[i]),
+            reverse=True,
+        )
+    else:
+        order = sorted(range(len(docs)), key=lambda i: heur[i], reverse=True)
+    return [docs[i] for i in order]
+
+
+def _heuristic_scores(docs: List[Document], query: str) -> List[float]:
+    """Legacy heuristic: 50% BM25 / 30% recency / 20% page position."""
     query_tokens = re.findall(r"\b\w+\b", query.lower())
 
     # Collect raw scores
@@ -174,14 +192,8 @@ def rank_chunks(docs: List[Document], query: str) -> List[Document]:
 
     # Normalize BM25 to [0, 1]
     max_bm25 = max(s[0] for s in scored) or 1.0
-    ranked = []
-    for bm25, recency, page_score, _, doc in scored:
-        combined = 0.5 * (bm25 / max_bm25) + 0.3 * recency + 0.2 * page_score
-        ranked.append((combined, doc))
-
-    ranked.sort(key=lambda x: x[0], reverse=True)
-    logger.debug(f"[rank_chunks] Re-ranked {len(ranked)} chunks.")
-    return [doc for _, doc in ranked]
+    return [0.5 * (bm25 / max_bm25) + 0.3 * recency + 0.2 * page_score
+            for bm25, recency, page_score, _, _ in scored]
 
 
 # ── History Compression ─────────────────────────────────────────────────────────

@@ -135,26 +135,13 @@ def _search_kb(
         from VENUAI.rag_server import get_vector_store
         from VENUAI.context_engineer import rank_chunks
 
-        search_kwargs = {"k": top_k}
-        if allowed_doc_ids is not None:
-            search_kwargs["filter"] = {"doc_id": {"$in": allowed_doc_ids or ["__none__"]}}
-
-        vs = get_vector_store()
-        retriever = vs.as_retriever(search_type="similarity", search_kwargs=search_kwargs)
-        docs = retriever.invoke(query)
-
-        # Phase 5: fold in table/image region hits, same as the standard
-        # RAG and Agentic RAG paths (VENUAI.rag_server.retrieve_node,
-        # VENUAI.agentic_rag._retrieve) — this was the one retrieval mode
-        # still missing it. Best-effort: a lexical-search failure here
-        # must not break the text-chunk result.
-        try:
-            from VENUAI.multimodal_retrieval import retrieve_multimodal_documents
-            region_docs = retrieve_multimodal_documents(query, allowed_doc_ids, top_k=3)
-            if region_docs:
-                docs = list(docs) + region_docs
-        except Exception as region_err:
-            logger.warning(f"[drdo_kb_search] multimodal region retrieval skipped: {region_err}")
+        # Shared pipeline (VENUAI.retrieval): dense + cached BM25 -> RRF ->
+        # cross-encoder rerank -> relevance floor, multimodal regions included.
+        # The agent already writes its own query, so no history rewrite here.
+        from VENUAI.retrieval import retrieve_documents
+        docs = retrieve_documents(
+            get_vector_store(), query, top_k, allowed_doc_ids, rewrite=False,
+        ).documents
 
         ranked = rank_chunks(docs, query)
 
