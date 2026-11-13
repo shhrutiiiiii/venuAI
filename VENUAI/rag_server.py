@@ -34,6 +34,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from VENUAI import auth
+from VENUAI.ai_gateway.provider import get_groq_client, get_chat_groq
 from VENUAI.auth import AuthenticatedUser, get_current_user, require_admin
 from VENUAI.upload_security import generate_storage_name, validate_upload
 
@@ -48,10 +49,11 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY not found in environment/.env")
 
-# Real Groq-served model id. The previous default ("qwen/qwen3.8-27b") did not
-# exist in Groq's catalog and silently fell through to the fallback list in
-# create_groq_completion() below. See Documents/architecture-decisions.md ADR-001.
-DEFAULT_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+# Primary model id (GROQ_MODEL overrides; the router puts it first in the
+# fallback chain). llama-3.3-70b-versatile / llama-3.1-8b-instant are retired.
+# All generation goes through ai_gateway (registry -> router -> AIGateway).
+# See Documents/AI/model-routing.md and ADR-014 in Documents/architecture-decisions.md.
+DEFAULT_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploaded_docs"
@@ -91,32 +93,6 @@ def load_prefilled_kb() -> dict:
         except Exception as e:
             logger.error(f"Error loading prefilled KB: {e}")
     return {}
-
-def create_groq_completion(client, messages, max_tokens=1500, temperature=0.2, stream=False):
-    """
-    Streaming completions with model fallback. Used only by /query/stream.
-    Not routed through AIGateway (VENUAI/ai_gateway/) — that gateway's
-    complete() is a single blocking call and does not support streaming;
-    see Documents/AI/model-routing.md "Not Yet Implemented". The fallback
-    model list still comes from the same ModelRegistry/Router the gateway
-    uses, so there is exactly one place or model ids are maintained.
-    """
-    from VENUAI.ai_gateway.model_router import TaskType, route
-    candidate_models = [m.model_id for m in route(TaskType.GENERATION)] or [DEFAULT_MODEL]
-    last_err = None
-    for m in candidate_models:
-        try:
-            return client.chat.completions.create(
-                model=m,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                stream=stream
-            )
-        except Exception as e:
-            logger.warning(f"Groq completion with model '{m}' failed: {e}")
-            last_err = e
-    raise last_err
 
 # ── FastAPI App ────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -176,17 +152,36 @@ def get_vector_store():
         )
     return _vector_store
 
+class _GatewayLLM:
+    """Minimal `.invoke(prompt)` adapter over AIGateway.complete(GENERATION), so
+    the LangGraph nodes share the gateway's fallback chain, circuit breaker,
+    timeouts, reasoning-effort handling and telemetry. The result carries
+    `.model_id` = the model that actually answered."""
+
+    def invoke(self, prompt_text: str):
+        from types import SimpleNamespace
+        from VENUAI.ai_gateway.gateway import get_gateway
+        from VENUAI.ai_gateway.model_router import TaskType
+        result = get_gateway().complete(
+            task_type=TaskType.GENERATION,
+            messages=[{"role": "user", "content": prompt_text}],
+            max_tokens=1500,
+            temperature=0.2,
+        )
+        return SimpleNamespace(content=result.content, model_id=result.model_id)
+
+
 def get_llm():
     global _llm
     if _llm is None:
-        from langchain_groq import ChatGroq
-        _llm = ChatGroq(
-            api_key=GROQ_API_KEY,
-            model_name=DEFAULT_MODEL,
-            temperature=0.2,
-            max_tokens=1500,
-        )
+        _llm = _GatewayLLM()
     return _llm
+
+
+def _primary_model_label() -> str:
+    from VENUAI.ai_gateway.model_router import TaskType, route
+    chain = route(TaskType.GENERATION)
+    return chain[0].model_id if chain else DEFAULT_MODEL
 
 
 # ── DRDO-Specific RAG Prompt ───────────────────────────────────────────────────
@@ -597,6 +592,16 @@ def add_tenant_member(
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
+def _llm_health() -> dict:
+    from VENUAI.ai_gateway.model_router import TaskType, route
+    chain = [m.model_id for m in route(TaskType.GENERATION)]
+    return {
+        "provider": "groq",
+        "primary_model": chain[0] if chain else None,
+        "fallback_chain": chain[1:],
+    }
+
+
 @app.get("/health")
 def health_check():
     meta = load_metadata()
@@ -607,7 +612,7 @@ def health_check():
         "documents_ingested": len(meta),
         "vector_store": "ChromaDB (local)",
         "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-        "llm": "groq/compound (Groq)",
+        "llm": _llm_health(),
         "note": "Embedding model loads on first upload/query",
     }
 
@@ -928,6 +933,7 @@ def generate_node(state: RAGGraphState) -> dict:
     llm = get_llm()
     res = llm.invoke(prompt_text)
     answer_text = res.content if hasattr(res, "content") else str(res)
+    answered_by = getattr(res, "model_id", None) or _primary_model_label()
 
     seen_sources: set = set()
     sources: List[QuerySource] = []
@@ -946,7 +952,7 @@ def generate_node(state: RAGGraphState) -> dict:
         "answer": answer_text,
         "sources": sources,
         "documents": ranked_docs,
-        "model_used": "groq/compound (Groq / LangGraph + ContextEngineer)",
+        "model_used": answered_by,
     }
 
 
@@ -962,13 +968,12 @@ def verify_node(state: RAGGraphState) -> dict:
     from VENUAI.hallucination_detector import get_hallucination_detector
     from VENUAI.verification_pipeline import get_verification_pipeline
     from VENUAI import evidence_store
-    from groq import Groq as _Groq
 
     answer   = state.get("answer", "")
     question = state.get("question", "")
     docs     = state.get("documents", [])
 
-    verifier = get_verifier(_Groq(api_key=GROQ_API_KEY))
+    verifier = get_verifier(get_groq_client())
     v_result = verifier.verify(answer, question, docs)
     final_answer = v_result.revised_answer if v_result.revised_answer else answer
 
@@ -1011,6 +1016,7 @@ Answer:"""
 
     res = llm.invoke(prompt_text)
     ans_text = res.content if hasattr(res, 'content') else str(res)
+    answered_by = getattr(res, "model_id", None) or _primary_model_label()
     return {
         "answer": ans_text,
         "annotated_answer": ans_text,
@@ -1022,7 +1028,7 @@ Answer:"""
             page=1,
             chunk_preview="DRDO laboratories directory, weapons platforms, and technology clusters.",
         )],
-        "model_used": "groq/compound (Preloaded KB / LangGraph Fallback)",
+        "model_used": answered_by,
         # This path doesn't run VerificationPipeline — there is no retrieved
         # Document list to build claim-level Evidence from here, only the
         # raw preloaded KB JSON. Reporting 0/False rather than a fabricated
@@ -1123,8 +1129,7 @@ def query_knowledge_base(
         if req.multi_agent_mode:
             import asyncio
             from VENUAI.agents.orchestrator import OrchestratorAgent
-            from groq import Groq as _Groq
-            orchestrator = OrchestratorAgent(_Groq(api_key=GROQ_API_KEY))
+            orchestrator = OrchestratorAgent(get_groq_client())
             agent_result = asyncio.run(
                 orchestrator.route(
                     req.question, effective_history, mem_ctx,
@@ -1193,12 +1198,18 @@ def query_knowledge_base(
         if req.agent_mode:
             from langgraph.prebuilt import create_react_agent
             from VENUAI.agent_tools import build_agent_tools
-            from langchain_groq import ChatGroq
-            agent_llm = ChatGroq(
-                api_key=GROQ_API_KEY,
-                model_name=DEFAULT_MODEL,
-                temperature=0.2,
-                max_tokens=1500,
+            # LangGraph's prebuilt agent needs a LangChain chat model, so this
+            # path can't use AIGateway.complete; it is built via the central
+            # helper (timeout/retry policy) on the router's first model, and
+            # that model id is reported as the model used.
+            from VENUAI.ai_gateway.model_router import TaskType as _TT, reasoning_effort_for as _eff
+            react_model = _primary_model_label()
+            from VENUAI.ai_gateway.model_registry import get_model as _get_model
+            _entry = _get_model(react_model)
+            _style = _entry.reasoning_style if _entry else ""
+            agent_llm = get_chat_groq(
+                react_model, temperature=0.2, max_tokens=3000,
+                reasoning_effort=_eff(_TT.GENERATION) if _style == "effort" else None,
             )
             # Tools are built fresh per request, bound to this caller's identity
             # and document-visibility set — the ReAct agent can no longer
@@ -1282,7 +1293,7 @@ def query_knowledge_base(
             return QueryResponse(
                 answer=answer_text,
                 sources=react_sources,
-                model="ReAct Agent (LangGraph prebuilt)",
+                model=f"{react_model} (ReAct)",
                 chunks_retrieved=len(collected_docs),
                 grounding_score=0.7,
                 hallucination_score=0.0,
@@ -1382,7 +1393,6 @@ async def query_stream(
     from fastapi.responses import StreamingResponse
     from VENUAI.context_engineer import ContextBudget, rank_chunks, compress_history, build_drdo_prompt
     from VENUAI.memory_manager import get_memory_manager
-    from groq import Groq as _Groq
 
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
@@ -1434,21 +1444,22 @@ async def query_stream(
                 semantic_memories=mem_ctx.get("semantic", []),
             )
 
-            stream_client = _Groq(api_key=GROQ_API_KEY)
+            from VENUAI.ai_gateway.gateway import get_gateway
+            from VENUAI.ai_gateway.model_router import TaskType as _StreamTT
             full_answer = ""
-            stream = create_groq_completion(
-                stream_client,
+            # Gateway streaming: fallback chain + circuit breaker before the
+            # first token; sync Groq iteration runs in worker threads.
+            gw_stream = await get_gateway().astream(
+                _StreamTT.GENERATION,
                 messages=[{"role": "user", "content": prompt_text}],
                 max_tokens=1500,
                 temperature=0.2,
-                stream=True,
             )
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content or ""
-                if delta:
-                    full_answer += delta
-                    yield f'data: {{"token": {json.dumps(delta)}}}\n\n'
-                    await asyncio.sleep(0)
+            stream_model_used = gw_stream.model_used
+            yield f'data: {{"model": {json.dumps(stream_model_used)}}}\n\n'
+            async for delta in gw_stream:
+                full_answer += delta
+                yield f'data: {{"token": {json.dumps(delta)}}}\n\n'
 
             sources_list = []
             seen: set = set()
@@ -1519,7 +1530,6 @@ def run_deep_research(
     DeepResearchAgent.MAX_RUNTIME_SECONDS (120s) for a multi-subquestion plan.
     """
     import uuid
-    from groq import Groq as _Groq
     from VENUAI.agents.deep_research_agent import DeepResearchAgent
     from VENUAI.memory_manager import get_memory_manager
     from VENUAI.guardrails import get_guardrail_engine
@@ -1536,7 +1546,7 @@ def run_deep_research(
     allowed_doc_ids = get_visible_doc_ids(current_user)
 
     result = DeepResearchAgent().research(
-        req.question, _Groq(api_key=GROQ_API_KEY), allowed_doc_ids=allowed_doc_ids
+        req.question, get_groq_client(), allowed_doc_ids=allowed_doc_ids
     )
 
     mm = get_memory_manager()
@@ -1577,7 +1587,7 @@ def run_deep_research(
             research_evidence, owner_id=current_user.id, classification="UNKNOWN", tenant_id=current_user.tenant_id,
         )
         llm = extract_llm(
-            research_evidence, _Groq(api_key=GROQ_API_KEY), owner_id=current_user.id, classification="UNKNOWN",
+            research_evidence, get_groq_client(), owner_id=current_user.id, classification="UNKNOWN",
             tenant_id=current_user.tenant_id,
         )
 
@@ -1784,7 +1794,6 @@ def ask_about_region(
     """
     from VENUAI.agents.vision_agent import VisionAgent
     from VENUAI.multimodal_document import BoundingBox, DocumentRegion, RegionType
-    from groq import Groq as _Groq
 
     meta = load_metadata()
     if doc_id not in meta or not meta[doc_id].get("is_multimodal"):
@@ -1811,7 +1820,7 @@ def ask_about_region(
         ocr_unavailable_reason=region_dict.get("ocr_unavailable_reason"),
     )
 
-    result = VisionAgent().analyze_region(region, req.question, groq_client=_Groq(api_key=GROQ_API_KEY))
+    result = VisionAgent().analyze_region(region, req.question, groq_client=get_groq_client())
     return RegionQuestionResponse(
         answer=result.answer,
         insufficient_visual_evidence=result.insufficient_visual_evidence,
@@ -2006,7 +2015,6 @@ def analyze_dataset(
     access control, and shapes the result for the API/frontend.
     """
     import pandas as pd
-    from groq import Groq as _Groq
     from VENUAI.agents.data_analyst_agent import DataAnalystAgent
     from VENUAI.guardrails import get_guardrail_engine
 
@@ -2030,7 +2038,7 @@ def analyze_dataset(
     ext = file_path.suffix.lower()
     df = pd.read_csv(file_path) if ext == ".csv" else pd.read_excel(file_path)
 
-    result = DataAnalystAgent().analyze(df, req.question, groq_client=_Groq(api_key=GROQ_API_KEY))
+    result = DataAnalystAgent().analyze(df, req.question, groq_client=get_groq_client())
 
     return DatasetAnalyzeResponse(
         operation=result.operation,
@@ -2111,7 +2119,6 @@ def extract_graph(
     from VENUAI.guardrails import get_guardrail_engine
     from VENUAI.knowledge_graph.extraction import extract_deterministic, extract_llm
     from VENUAI.knowledge_graph.store import get_graph_store
-    from groq import Groq as _Groq
 
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
@@ -2136,7 +2143,7 @@ def extract_graph(
 
     if req.use_llm:
         llm_result = extract_llm(
-            evidence, _Groq(api_key=GROQ_API_KEY), owner_id=current_user.id, classification="UNKNOWN",
+            evidence, get_groq_client(), owner_id=current_user.id, classification="UNKNOWN",
             tenant_id=current_user.tenant_id,
         )
         all_entities += llm_result.entities
