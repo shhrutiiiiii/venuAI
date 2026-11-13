@@ -264,3 +264,12 @@ body {
   mask-composite: exclude;
   pointer-events: none;
 }
+
+/* ── Print: only the answer/report being exported ── */
+@media print {
+  body.printing-one * { visibility: hidden !important; }
+  body.printing-one .print-target,
+  body.printing-one .print-target * { visibility: visible !important; }
+  body.printing-one .print-target { position: absolute; left: 0; top: 0; width: 100%; color: #000 !important; background: #fff !important; }
+  .no-print { display: none !important; }
+}

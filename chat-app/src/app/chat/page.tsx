@@ -49,6 +49,11 @@ import ThemeToggle from "@/components/ThemeToggle";
 import FormattedMarkdown from "@/components/FormattedMarkdown";
 import { ConfidenceBadge } from "@/components/ConfidenceBadge";
 import { VerificationPanel } from "@/components/VerificationPanel";
+import { ModelRouting, type RegistryModel } from "@/components/ModelRouting";
+import { ShieldAlert } from "lucide-react";
+import { AnswerActions } from "@/components/AnswerActions";
+import { ResearchReport, ResearchPending, type ResearchData } from "@/components/ResearchReport";
+import { answerToMarkdown, cleanScore, normalizeCitations, type Citation } from "@/lib/answerTypes";
 import { AgentModeToggle, AgentMode } from "@/components/AgentModeToggle";
 import { StreamingMessage } from "@/components/StreamingMessage";
 import DataAnalystWorkspace from "@/components/DataAnalystWorkspace";
@@ -100,14 +105,6 @@ function extractErrorMessage(data: unknown, fallback: string = "An error occurre
 
 // ─── AI Models List ───────────────────────────────────────────────────────────
 
-const AI_MODELS = [
-  { id: "venu-pro", name: "VenuAI Pro v2.4", badge: "Default", desc: "Fast & intelligent general AI agent" },
-  { id: "code-architect", name: "Code Architect v4.0", badge: "Coding", desc: "Specialized in React, Next.js & TypeScript" },
-  { id: "ui-designer", name: "UI/UX Design Copilot", badge: "Design", desc: "Tailwind CSS & design systems specialist" },
-  { id: "data-analyst", name: "Data Analyst Agent", badge: "Analysis", desc: "Metrics, logs, and system performance" },
-  { id: "drdo-rag", name: "DRDO RAG Agent", badge: "RAG", desc: "Answers from your DRDO document library" },
-];
-
 // ─── DRDO RAG Types ───────────────────────────────────────────────────────────
 
 interface RagDocument {
@@ -135,6 +132,15 @@ interface RagMessage {
   grounding_score?: number;
   hallucination_score?: number;
   verification_flags?: string[];
+  citations?: Citation[];
+  verified?: boolean | null;
+  verification_reason?: string;
+  blocked?: boolean;
+  block_reason?: string;
+  model_used?: string;
+  question?: string;
+  research?: ResearchData;
+  researchPending?: boolean;
   agent_mode?: AgentMode;
   isStreaming?: boolean;
   isError?: boolean;
@@ -180,7 +186,7 @@ const INITIAL_AI_MESSAGES: AiMessage[] = [
   {
     id: "m-2",
     sender: "ai",
-    modelName: "VenuAI Pro v2.4",
+    modelName: "VenuAI backend",
     reasoningTime: "0.24s",
     timestamp: "10:14 AM",
     text: "VenuAI achieves sub-10ms latency by pairing an event-driven WebSocket pooling layer with zero-allocation memory buffers and optimized regional edge routing. Here is a high-level architectural overview:",
@@ -250,8 +256,8 @@ export default function ChatPage() {
   const [workspaceMode, setWorkspaceMode] = useState<"ai_agent" | "team_chat" | "drdo_rag" | "data_analyst">("drdo_rag");
 
   // AI Agent States
-  const [selectedModel, setSelectedModel] = useState("venu-pro");
-  const [showModelPicker, setShowModelPicker] = useState(false);
+  const [registryModels, setRegistryModels] = useState<RegistryModel[] | null>(null);
+  const [deepResearch, setDeepResearch] = useState(false);
   const [aiThreads, setAiThreads] = useState(INITIAL_AI_THREADS);
   const [activeThreadId, setActiveThreadId] = useState<string | null>("t-1");
   const [messages, setMessages] = useState<AiMessage[]>(INITIAL_AI_MESSAGES);
@@ -315,6 +321,21 @@ export default function ChatPage() {
       setRagServerStatus("offline");
     }
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/models")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d) => {
+        if (!cancelled) setRegistryModels(Array.isArray(d) ? d : []);
+      })
+      .catch(() => {
+        if (!cancelled) setRegistryModels([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     // Standard "mark as mounted" flag for hydration-safe rendering — this
@@ -434,12 +455,19 @@ export default function ChatPage() {
     const placeholderMsg: RagMessage = {
       id: aiMsgId,
       sender: "ai",
-      text: useStreaming ? "" : "Analyzing DRDO research documents...",
+      text: deepResearch || useStreaming ? "" : "Analyzing DRDO research documents...",
       timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       agent_mode: agentMode,
-      isStreaming: useStreaming,
+      isStreaming: useStreaming && !deepResearch,
+      question,
+      researchPending: deepResearch,
     };
     setRagMessages((prev) => [...prev, placeholderMsg]);
+
+    if (deepResearch) {
+      await runDeepResearch(question, aiMsgId);
+      return;
+    }
 
     const requestBody = {
       question,
@@ -492,8 +520,14 @@ export default function ChatPage() {
                       ? {
                           ...msg,
                           text: accumulatedText,
-                          grounding_score: parsed.grounding_score || msg.grounding_score || 0.88,
+                          // The stream "done" score is not a verified measurement
+                          // unless the backend marks verified === true.
+                          grounding_score: parsed.verified === true ? cleanScore(parsed.grounding_score) ?? msg.grounding_score : msg.grounding_score,
+                          verified: typeof parsed.verified === "boolean" ? parsed.verified : msg.verified,
+                          verification_reason: typeof parsed.verification_reason === "string" ? parsed.verification_reason : msg.verification_reason,
                           sources: parsed.sources || msg.sources,
+                          citations: parsed.citations || parsed.sources ? normalizeCitations(parsed.citations, parsed.sources) : msg.citations,
+                          model_used: typeof parsed.model_used === "string" ? parsed.model_used : msg.model_used,
                           verification_flags: parsed.verification_flags || msg.verification_flags,
                         }
                       : msg
@@ -514,7 +548,7 @@ export default function ChatPage() {
 
         setRagMessages((prev) =>
           prev.map((msg) =>
-            msg.id === aiMsgId ? { ...msg, isStreaming: false, grounding_score: msg.grounding_score || 0.88 } : msg
+            msg.id === aiMsgId ? { ...msg, isStreaming: false } : msg
           )
         );
       } catch {
@@ -525,6 +559,72 @@ export default function ChatPage() {
       }
     } else {
       fetchStandardRagQuery(requestBody, aiMsgId);
+    }
+  };
+
+  // Maps a /query response (current or future shape) onto a message patch.
+  // Scores are only kept when the backend actually reports them.
+  const mapQueryResponse = (data: Record<string, unknown>): Partial<RagMessage> => {
+    const flags = Array.isArray(data.verification_flags) ? (data.verification_flags as string[]) : [];
+    const guardFlag = flags.find((f) => f.startsWith("GUARDRAIL_TRIGGERED"));
+    const blocked = data.blocked === true || !!guardFlag;
+    const verified = typeof data.verified === "boolean" ? data.verified : null;
+    return {
+      text: String(data.answer ?? ""),
+      sources: data.sources as RagSource[] | undefined,
+      citations: normalizeCitations(data.citations as Citation[] | undefined, data.sources as RagSource[] | undefined),
+      chunks_retrieved: data.chunks_retrieved as number | undefined,
+      grounding_score: blocked ? undefined : cleanScore(data.grounding_score) ?? undefined,
+      hallucination_score: blocked ? undefined : cleanScore(data.hallucination_score) ?? undefined,
+      verified,
+      verification_reason:
+        typeof data.verification_reason === "string" ? data.verification_reason : typeof data.reason === "string" ? data.reason : undefined,
+      verification_flags: flags,
+      blocked,
+      block_reason:
+        (typeof data.block_reason === "string" && data.block_reason) ||
+        guardFlag?.replace(/^GUARDRAIL_TRIGGERED:?\s*/, "") ||
+        undefined,
+      model_used: typeof data.model_used === "string" ? data.model_used : undefined,
+    };
+  };
+
+  const runDeepResearch = async (question: string, aiMsgId: string) => {
+    try {
+      const res = await fetch("/api/rag/research", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      });
+      const data = await res.json().catch(() => ({}));
+      setRagMessages((prev) =>
+        prev.map((msg) =>
+          msg.id !== aiMsgId
+            ? msg
+            : res.ok
+            ? { ...msg, researchPending: false, isStreaming: false, research: data as ResearchData, text: (data as ResearchData).synthesized_answer }
+            : {
+                ...msg,
+                researchPending: false,
+                isStreaming: false,
+                isError: true,
+                text:
+                  res.status === 429
+                    ? "Deep research is rate limited (5 per minute). Wait a moment and try again."
+                    : res.status === 504
+                    ? "Deep research timed out. Try a narrower question."
+                    : extractErrorMessage(data, "Deep research failed."),
+              }
+        )
+      );
+    } catch {
+      setRagMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === aiMsgId ? { ...msg, researchPending: false, isStreaming: false, isError: true, text: "Cannot reach the research service." } : msg
+        )
+      );
+    } finally {
+      setRagLoading(false);
     }
   };
 
@@ -541,12 +641,7 @@ export default function ChatPage() {
           msg.id === aiMsgId
             ? {
                 ...msg,
-                text: res.ok ? data.answer : extractErrorMessage(data, "An error occurred."),
-                sources: res.ok ? data.sources : undefined,
-                chunks_retrieved: res.ok ? data.chunks_retrieved : undefined,
-                grounding_score: res.ok ? data.grounding_score || 0.85 : 0.0,
-                hallucination_score: res.ok ? data.hallucination_score || 0.05 : 0.0,
-                verification_flags: res.ok ? data.verification_flags || [] : [],
+                ...(res.ok ? mapQueryResponse(data) : { text: extractErrorMessage(data, "An error occurred.") }),
                 isStreaming: false,
                 isError: !res.ok,
               }
@@ -627,13 +722,12 @@ export default function ChatPage() {
       const data = await res.json();
       // eslint-disable-next-line react-hooks/purity
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-      const activeModelObj = AI_MODELS.find((m) => m.id === selectedModel);
 
       const aiMsg: AiMessage = {
         // eslint-disable-next-line react-hooks/purity
         id: `ai-${Date.now()}`,
         sender: "ai",
-        modelName: activeModelObj?.name || "VenuAI Pro v2.4",
+        modelName: "VenuAI backend",
         reasoningTime: `${elapsed}s`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         text: res.ok ? data.answer : extractErrorMessage(data, "Error connecting to AI backend."),
@@ -642,11 +736,10 @@ export default function ChatPage() {
 
       setMessages((prev) => [...prev, aiMsg]);
     } catch {
-      const activeModelObj = AI_MODELS.find((m) => m.id === selectedModel);
       setMessages((prev) => [...prev, {
         id: `ai-err-${Date.now()}`,
         sender: "ai",
-        modelName: activeModelObj?.name || "VenuAI Pro v2.4",
+        modelName: "VenuAI backend",
         reasoningTime: "0.01s",
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         text: "❌ Unable to connect to backend server. Ensure backend server is running.",
@@ -673,7 +766,7 @@ export default function ChatPage() {
 
   if (!mounted || isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center transition-colors duration-300" style={{ background: "var(--bg-main)" }}>
+      <div className="min-h-screen flex items-center justify-center transition-colors duration-300">
         <div className="flex flex-col items-center gap-4">
           <div
             className="w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg"
@@ -689,12 +782,11 @@ export default function ChatPage() {
 
   if (!isAuthenticated) return null;
 
-  const currentModelObj = AI_MODELS.find((m) => m.id === selectedModel) || AI_MODELS[0];
 
   return (
     <div
       className="flex h-screen overflow-hidden transition-colors duration-300"
-      style={{ background: "var(--bg-main)", color: "var(--text-main)" }}
+      style={{ color: "var(--text-main)" }}
     >
       {/* ── Left Sidebar (ChatGPT / Gemini / Team / DRDO RAG) ── */}
       <aside
@@ -1020,66 +1112,7 @@ export default function ChatPage() {
           style={{ borderColor: "var(--border-subtle)", background: "var(--bg-panel)" }}
         >
           {workspaceMode === "ai_agent" ? (
-            /* Model Picker Dropdown (ChatGPT / Gemini style) */
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setShowModelPicker((v) => !v)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-bold transition-all hover:scale-[1.01]"
-                style={{
-                  background: "var(--bg-card)",
-                  borderColor: "var(--border-subtle)",
-                  color: "var(--text-main)",
-                }}
-              >
-                <Bot className="w-4 h-4" style={{ color: "var(--text-main)" }} />
-                <span>{currentModelObj.name}</span>
-                <span className="text-[9px] px-1.5 py-0.5 rounded font-black uppercase" style={{ background: "var(--badge-bg)", color: "var(--badge-text)" }}>
-                  {currentModelObj.badge}
-                </span>
-                <ChevronDown className="w-3.5 h-3.5" style={{ color: "var(--text-subtle)" }} />
-              </button>
-
-              {/* Model Select Menu */}
-              {showModelPicker && (
-                <div
-                  className="absolute top-full left-0 mt-2 w-72 p-2 rounded-2xl decent-card space-y-1 z-50 fade-in-up"
-                  style={{ background: "var(--bg-card)", borderColor: "var(--border-subtle)" }}
-                >
-                  <p className="text-[10px] font-bold uppercase tracking-wider px-2 py-1" style={{ color: "var(--text-subtle)" }}>
-                    Select AI Model
-                  </p>
-                  {AI_MODELS.map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedModel(m.id);
-                        setShowModelPicker(false);
-                      }}
-                      className={`w-full flex items-start gap-2.5 p-2.5 rounded-xl text-left transition-all ${
-                        selectedModel === m.id ? "border" : "hover:bg-slate-500/5"
-                      }`}
-                      style={{
-                        background: selectedModel === m.id ? "var(--badge-bg)" : "transparent",
-                        borderColor: selectedModel === m.id ? "var(--badge-border)" : "transparent",
-                      }}
-                    >
-                      <Bot className="w-4 h-4 mt-0.5 shrink-0" style={{ color: "var(--text-main)" }} />
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-xs font-bold" style={{ color: "var(--text-main)" }}>{m.name}</span>
-                          <span className="text-[9px] font-black uppercase px-1 rounded" style={{ background: "var(--badge-border)", color: "var(--badge-text)" }}>
-                            {m.badge}
-                          </span>
-                        </div>
-                        <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>{m.desc}</p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            <ModelRouting models={registryModels} />
           ) : workspaceMode === "team_chat" ? (
             /* Team Channel Title */
             <div className="flex items-center gap-2">
@@ -1112,7 +1145,22 @@ export default function ChatPage() {
           <div className="flex items-center gap-3">
             {workspaceMode === "drdo_rag" && (
               <div className="flex items-center gap-2">
-                <AgentModeToggle mode={agentMode} onChange={setAgentMode} />
+                <ModelRouting models={registryModels} />
+                <button
+                  type="button"
+                  onClick={() => setDeepResearch((v) => !v)}
+                  aria-pressed={deepResearch}
+                  className="px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-all"
+                  style={{
+                    background: deepResearch ? "var(--badge-bg)" : "var(--bg-input)",
+                    color: deepResearch ? "var(--text-main)" : "var(--text-muted)",
+                    borderColor: deepResearch ? "var(--border-hover)" : "var(--border-subtle)",
+                  }}
+                  title="Deep Research: plan sub-questions, retrieve evidence for each, synthesize and verify. Can take up to ~2 minutes."
+                >
+                  Deep Research
+                </button>
+                <AgentModeToggle mode={agentMode} onChange={setAgentMode} disabled={deepResearch} />
                 <button
                   type="button"
                   onClick={() => setUseStreaming((v) => !v)}
@@ -1239,34 +1287,70 @@ export default function ChatPage() {
                         <div className="flex-1 min-w-0 space-y-2.5">
                           {/* RAG Meta Header */}
                           <div className="flex items-center gap-2 flex-wrap justify-between">
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <span className="text-xs font-bold" style={{ color: "var(--text-main)" }}>DRDO RAG Agent</span>
-                              {!msg.isError && msg.grounding_score !== undefined && (
+                              {!msg.isError && !msg.blocked && !msg.researchPending && !msg.research && (
                                 <ConfidenceBadge
                                   score={msg.grounding_score}
+                                  verified={msg.verified}
+                                  reason={msg.verification_reason}
                                   hallucinationScore={msg.hallucination_score}
                                 />
+                              )}
+                              {msg.model_used && (
+                                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border" style={{ borderColor: "var(--border-subtle)", color: "var(--text-muted)" }}>
+                                  {msg.model_used}
+                                </span>
                               )}
                               <span className="text-[10px]" style={{ color: "var(--text-subtle)" }}>{msg.timestamp}</span>
                             </div>
                           </div>
 
-                          {/* Answer Text — Typewriter / Streaming Render */}
-                          {msg.isError ? (
-                            <p className="text-sm font-medium text-red-500">{msg.text}</p>
+                          {msg.researchPending ? (
+                            <ResearchPending question={msg.question || ""} />
+                          ) : msg.research ? (
+                            <ResearchReport data={msg.research} />
+                          ) : msg.isError ? (
+                            <p className="text-sm font-medium text-red-500 break-words">{msg.text}</p>
+                          ) : msg.blocked ? (
+                            <div className="p-3 rounded-xl border text-sm space-y-1" style={{ borderColor: "rgba(244,63,94,0.4)", background: "rgba(244,63,94,0.08)" }}>
+                              <div className="flex items-center gap-1.5 font-bold text-rose-500">
+                                <ShieldAlert className="w-4 h-4" /> Blocked by guardrails
+                              </div>
+                              <p className="break-words" style={{ color: "var(--text-main)" }}>{msg.text}</p>
+                              {msg.block_reason && <p className="text-[11px]" style={{ color: "var(--text-muted)" }}>Reason: {msg.block_reason}</p>}
+                            </div>
                           ) : (
-                            <StreamingMessage content={msg.text} isStreaming={msg.isStreaming} />
-                          )}
-
-                          {/* Verification Audit Panel */}
-                          {!msg.isError && msg.text && (
-                            <VerificationPanel
-                              groundingScore={msg.grounding_score || 0.88}
-                              hallucinationScore={msg.hallucination_score || 0.05}
-                              verificationFlags={msg.verification_flags || ["GROUNDING_CHECK_PASSED", "POLICY_OK"]}
-                              sources={msg.sources}
-                              model={msg.agent_mode === "multi_agent" ? "Multi-Agent Swarm" : msg.agent_mode === "react" ? "ReAct Tool Agent" : "Direct RAG Engine"}
-                            />
+                            <div className="print-scope space-y-2.5">
+                              <StreamingMessage content={msg.text} isStreaming={msg.isStreaming} citations={msg.citations} />
+                              {!msg.isStreaming && msg.text && (
+                                <>
+                                  <VerificationPanel
+                                    groundingScore={msg.grounding_score}
+                                    hallucinationScore={msg.hallucination_score}
+                                    verified={msg.verified}
+                                    reason={msg.verification_reason}
+                                    verificationFlags={msg.verification_flags}
+                                    citations={msg.citations}
+                                    modelUsed={msg.model_used}
+                                    model={msg.agent_mode === "multi_agent" ? "Multi-Agent Swarm" : msg.agent_mode === "react" ? "ReAct Tool Agent" : "Direct RAG Engine"}
+                                  />
+                                  <AnswerActions
+                                    markdown={answerToMarkdown({
+                                      question: ragMessages[ragMessages.findIndex((m) => m.id === msg.id) - 1]?.text,
+                                      answer: msg.text,
+                                      citations: msg.citations,
+                                      footer: [
+                                        typeof msg.grounding_score === "number" && msg.verified !== false
+                                          ? `Grounding score: ${Math.round(msg.grounding_score * 100)}%`
+                                          : "Grounding: unverified",
+                                      ],
+                                    })}
+                                    title={ragMessages[ragMessages.findIndex((m) => m.id === msg.id) - 1]?.text || "answer"}
+                                  />
+                                </>
+                              )}
+                            </div>
                           )}
                         </div>
                       </div>
@@ -1615,7 +1699,7 @@ export default function ChatPage() {
                     value={inputPrompt}
                     onChange={(e) => setInputPrompt(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") handleSendPrompt(); }}
-                    placeholder={workspaceMode === "ai_agent" ? `Ask ${currentModelObj.name} anything…` : `Message #${activeChannel}…`}
+                    placeholder={workspaceMode === "ai_agent" ? "Ask VenuAI anything…" : `Message #${activeChannel}…`}
                     className="flex-1 bg-transparent text-sm outline-none font-medium"
                     style={{ color: "var(--text-main)" }}
                   />

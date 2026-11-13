@@ -64,7 +64,7 @@ export default function SecurityCenterPage() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--bg-main)" }}>
+      <div className="min-h-screen flex items-center justify-center">
         <RefreshCw className="w-6 h-6 animate-spin" style={{ color: "var(--primary-accent)" }} />
       </div>
     );
@@ -72,7 +72,7 @@ export default function SecurityCenterPage() {
 
   if (!user || user.role !== "admin") {
     return (
-      <div className="min-h-screen flex items-center justify-center p-4" style={{ background: "var(--bg-main)" }}>
+      <div className="min-h-screen flex items-center justify-center p-4">
         <div className="max-w-md w-full rounded-2xl p-6 text-center" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}>
           <div className="w-12 h-12 bg-rose-500/10 rounded-full flex items-center justify-center mx-auto mb-4 border border-rose-500/20">
             <Lock className="w-6 h-6 text-rose-400" />
@@ -104,7 +104,7 @@ export default function SecurityCenterPage() {
   }
 
   return (
-    <div className="min-h-screen p-6 md:p-10" style={{ background: "var(--bg-main)", color: "var(--text-main)" }}>
+    <div className="min-h-screen p-6 md:p-10" style={{ color: "var(--text-main)" }}>
       <div className="max-w-6xl mx-auto space-y-6">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b pb-6" style={{ borderColor: "var(--border-subtle)" }}>
           <div className="flex items-center gap-3">

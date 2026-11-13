@@ -41,7 +41,7 @@ export default function ForgotPasswordPage() {
   return (
     <main
       className="min-h-screen flex items-center justify-center px-5"
-      style={{ background: "#060818" }}
+      style={{ background: "rgba(6, 8, 24, 0.8)" }}
     >
       {/* Background orb */}
       <div

@@ -2,13 +2,16 @@
 
 import React from "react";
 import { Check, Copy } from "lucide-react";
+import { CitationChip } from "./CitationChip";
+import type { Citation } from "@/lib/answerTypes";
 
 interface FormattedMarkdownProps {
   content: string;
   className?: string;
+  citations?: Citation[];
 }
 
-export default function FormattedMarkdown({ content, className = "" }: FormattedMarkdownProps) {
+export default function FormattedMarkdown({ content, className = "", citations }: FormattedMarkdownProps) {
   const [copiedIndex, setCopiedIndex] = React.useState<number | null>(null);
 
   const handleCopy = (text: string, index: number) => {
@@ -42,13 +45,13 @@ export default function FormattedMarkdown({ content, className = "" }: Formatted
                 className="text-base font-extrabold tracking-tight pt-2 pb-1 border-b"
                 style={{ color: "var(--text-main)", borderColor: "var(--border-subtle)" }}
               >
-                {renderInlineFormatting(block.text)}
+                {renderInlineFormatting(block.text, citations)}
               </h2>
             );
           }
           return (
             <h3 key={idx} className="text-sm font-bold pt-1.5 flex items-center gap-1.5" style={{ color: "var(--primary-accent)" }}>
-              {renderInlineFormatting(block.text)}
+              {renderInlineFormatting(block.text, citations)}
             </h3>
           );
         }
@@ -61,7 +64,7 @@ export default function FormattedMarkdown({ content, className = "" }: Formatted
                   <tr style={{ background: "var(--badge-bg)", borderBottom: "1px solid var(--border-subtle)" }}>
                     {block.headers.map((h, i) => (
                       <th key={i} className="px-4 py-3 font-bold uppercase text-[11px] tracking-wider" style={{ color: "var(--primary-accent)" }}>
-                        {renderInlineFormatting(h.trim())}
+                        {renderInlineFormatting(h.trim(), citations)}
                       </th>
                     ))}
                   </tr>
@@ -71,7 +74,7 @@ export default function FormattedMarkdown({ content, className = "" }: Formatted
                     <tr key={rIdx} className="hover:bg-slate-500/5 transition-colors">
                       {row.map((cell, cIdx) => (
                         <td key={cIdx} className="px-4 py-2.5 leading-relaxed font-medium" style={{ color: "var(--text-main)" }}>
-                          {renderInlineFormatting(cell.trim())}
+                          {renderInlineFormatting(cell.trim(), citations)}
                         </td>
                       ))}
                     </tr>
@@ -119,7 +122,7 @@ export default function FormattedMarkdown({ content, className = "" }: Formatted
               {block.items.map((item, i) => (
                 <li key={i} className="flex items-start gap-2.5 text-xs sm:text-sm">
                   <span className="inline-block w-1.5 h-1.5 rounded-full mt-2 shrink-0 shadow-sm" style={{ background: "var(--primary-accent)" }} />
-                  <span style={{ color: "var(--text-main)" }}>{renderInlineFormatting(item)}</span>
+                  <span style={{ color: "var(--text-main)" }}>{renderInlineFormatting(item, citations)}</span>
                 </li>
               ))}
             </ul>
@@ -134,7 +137,7 @@ export default function FormattedMarkdown({ content, className = "" }: Formatted
                   <span className="inline-flex items-center justify-center w-4.5 h-4.5 rounded-full text-[10px] font-extrabold shrink-0 mt-0.5 border" style={{ background: "var(--badge-bg)", borderColor: "var(--badge-border)", color: "var(--primary-accent)" }}>
                     {i + 1}
                   </span>
-                  <span style={{ color: "var(--text-main)" }}>{renderInlineFormatting(item)}</span>
+                  <span style={{ color: "var(--text-main)" }}>{renderInlineFormatting(item, citations)}</span>
                 </li>
               ))}
             </ol>
@@ -144,7 +147,7 @@ export default function FormattedMarkdown({ content, className = "" }: Formatted
         // Paragraph
         return (
           <p key={idx} className="text-xs sm:text-sm leading-relaxed font-normal" style={{ color: "var(--text-main)" }}>
-            {renderInlineFormatting(block.text)}
+            {renderInlineFormatting(block.text, citations)}
           </p>
         );
       })}
@@ -247,12 +250,12 @@ function parseMarkdownBlocks(text: string): Block[] {
   return blocks;
 }
 
-function renderInlineFormatting(text: string): React.ReactNode {
+function renderInlineFormatting(text: string, citations?: Citation[]): React.ReactNode {
   // Replace <br> or <br/> with space/newline
   const clean = text.replace(/<br\s*\/?>/gi, " ");
 
   // Simple parser for **bold** and `code`
-  const parts = clean.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  const parts = clean.split(/(\*\*[^*]+\*\*|`[^`]+`|\[\d{1,2}\])/g);
 
   return parts.map((part, idx) => {
     if (part.startsWith("**") && part.endsWith("**")) {
@@ -272,6 +275,11 @@ function renderInlineFormatting(text: string): React.ReactNode {
           {part.slice(1, -1)}
         </code>
       );
+    }
+    const cite = /^\[(\d{1,2})\]$/.exec(part);
+    if (cite && citations && citations.length > 0) {
+      const n = Number(cite[1]);
+      return <CitationChip key={idx} n={n} citation={citations.find((c) => c.index === n)} />;
     }
     return part;
   });

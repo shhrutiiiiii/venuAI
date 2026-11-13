@@ -114,7 +114,7 @@ function ResetPasswordForm() {
 
 export default function ResetPasswordPage() {
   return (
-    <main className="min-h-screen flex items-center justify-center px-5" style={{ background: "#060818" }}>
+    <main className="min-h-screen flex items-center justify-center px-5" style={{ background: "rgba(6, 8, 24, 0.8)" }}>
       <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden>
         <div
           className="absolute orb-animate"
