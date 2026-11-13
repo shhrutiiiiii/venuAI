@@ -26,4 +26,5 @@ next-env.d.ts
 .DS_Store
 *.log
 *.db
-*.sqlite3VENUAI/evals/.judge_cache/
+*.sqlite3
+VENUAI/evals/.judge_cache/

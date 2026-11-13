@@ -51,8 +51,9 @@ class Session:
         self.owned_user = email is None
         if email is None:
             tag = uuid.uuid4().hex[:8]
-            email, password, self.tenant = f"eval-{tag}@example.com", f"Ev@l-{uuid.uuid4().hex}", f"eval-{tag}"
-            r = self._req("post", "/auth/register", json={"email": email, "password": password, "tenant_id": self.tenant})
+            email, password = f"eval-{tag}@example.com", f"Ev@l-{uuid.uuid4().hex}"
+            # organization_name makes the server create a brand-new tenant -> isolated retrieval scope
+            r = self._req("post", "/auth/register", json={"email": email, "password": password, "organization_name": f"eval-{tag}"})
             if r.status_code >= 300:
                 raise HarvestError(f"register failed {r.status_code}: {r.text[:200]}")
         r = self._req("post", "/auth/login", json={"email": email, "password": password})

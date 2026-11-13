@@ -60,6 +60,11 @@ def make_client(base_url):
 def do_score(items, jsonl, args, name):
     judge = None
     if args.judge:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+        import os
+        if not os.getenv("GROQ_API_KEY"):
+            raise HarvestError("--judge needs GROQ_API_KEY (env or VENUAI/.env)")
         from VENUAI.evals.judge import Judge
         judge = Judge()
     rep = S.score(items, S.load_jsonl(jsonl), judge)
