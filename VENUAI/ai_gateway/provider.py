@@ -17,7 +17,6 @@ integration.
 
 import os
 import re
-import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Iterator, List, Optional
@@ -30,9 +29,6 @@ from typing import Iterator, List, Optional
 DEFAULT_GROQ_TIMEOUT_SECONDS = 30.0
 GROQ_SDK_MAX_RETRIES = 1
 
-_client_lock = threading.Lock()
-_sync_client = None
-
 
 def get_groq_timeout() -> float:
     try:
@@ -43,19 +39,13 @@ def get_groq_timeout() -> float:
 
 
 def get_groq_client(api_key: Optional[str] = None):
-    """Shared sync Groq client with timeout + max_retries=1. Cached when the
-    key comes from the environment."""
-    global _sync_client
+    """Sync Groq client with timeout + max_retries=1. Built per call (cheap; the
+    AIGateway singleton holds the long-lived one)."""
     from groq import Groq
-    if api_key is not None:
-        return Groq(api_key=api_key, timeout=get_groq_timeout(), max_retries=GROQ_SDK_MAX_RETRIES)
-    with _client_lock:
-        if _sync_client is None:
-            _sync_client = Groq(
-                api_key=os.getenv("GROQ_API_KEY"),
-                timeout=get_groq_timeout(), max_retries=GROQ_SDK_MAX_RETRIES,
-            )
-        return _sync_client
+    return Groq(
+        api_key=api_key or os.getenv("GROQ_API_KEY"),
+        timeout=get_groq_timeout(), max_retries=GROQ_SDK_MAX_RETRIES,
+    )
 
 
 def get_async_groq_client(api_key: Optional[str] = None):

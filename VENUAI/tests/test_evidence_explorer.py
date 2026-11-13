@@ -34,7 +34,7 @@ class _FakeResponse:
 class _FakeGroqClient:
     def __init__(self, answer_text="A fake answer."):
         class _Completions:
-            def create(inner_self, model, messages, max_tokens, temperature):
+            def create(inner_self, model, messages, max_tokens, temperature, **_kw):
                 return _FakeResponse(answer_text)
 
         class _Chat:
@@ -111,7 +111,7 @@ def test_list_evidence_requires_auth(client):
 def test_query_persists_an_evidence_record(client, auth_headers, monkeypatch):
     monkeypatch.setattr(rag_server, "get_vector_store", lambda: _EmptyFakeVectorStore())
     monkeypatch.setattr(rag_server, "get_llm", lambda: _FakeLLM("The Agni-V has a range of 5000 km."))
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient("The Agni-V has a range of 5000 km."))
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient("The Agni-V has a range of 5000 km."))
     monkeypatch.setattr(
         "VENUAI.verification_pipeline.get_verification_pipeline", lambda: _FakeVerificationPipeline(),
     )
@@ -144,7 +144,7 @@ def test_query_persists_an_evidence_record(client, auth_headers, monkeypatch):
 def test_other_user_cannot_see_your_evidence_records(client, auth_headers, monkeypatch):
     monkeypatch.setattr(rag_server, "get_vector_store", lambda: _EmptyFakeVectorStore())
     monkeypatch.setattr(rag_server, "get_llm", lambda: _FakeLLM("answer"))
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient("answer"))
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient("answer"))
     monkeypatch.setattr(
         "VENUAI.verification_pipeline.get_verification_pipeline", lambda: _FakeVerificationPipeline(),
     )
@@ -167,7 +167,7 @@ def test_other_user_cannot_see_your_evidence_records(client, auth_headers, monke
 
 def test_research_persists_an_evidence_record(client, auth_headers, monkeypatch):
     monkeypatch.setattr(rag_server, "get_vector_store", lambda: _EmptyFakeVectorStore())
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient("A fake research answer."))
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient("A fake research answer."))
     monkeypatch.setattr(
         "VENUAI.hallucination_detector.get_hallucination_detector",
         lambda: type("S", (), {"analyze": staticmethod(lambda a, d: (a, 0.0, []))})(),

@@ -50,7 +50,7 @@ class _FakeVectorStore:
 
 
 class _FakeChatCompletions:
-    def create(self, model, messages, max_tokens, temperature):
+    def create(self, model, messages, max_tokens, temperature, **_kw):
         class _Choice:
             class message:
                 content = "fake answer"

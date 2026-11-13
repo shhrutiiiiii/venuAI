@@ -124,7 +124,7 @@ def test_analyze_returns_real_computed_values_and_chart(client, auth_headers, mo
     class _FakeGroqClient:
         def __init__(self):
             class _Completions:
-                def create(inner_self, model, messages, max_tokens, temperature):
+                def create(inner_self, model, messages, max_tokens, temperature, **_kw):
                     return _FakeResponse("Missiles category has the highest average revenue.")
 
             class _Chat:
@@ -132,7 +132,7 @@ def test_analyze_returns_real_computed_values_and_chart(client, auth_headers, mo
 
             self.chat = _Chat()
 
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient())
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient())
 
     upload = client.post(
         "/datasets/upload",

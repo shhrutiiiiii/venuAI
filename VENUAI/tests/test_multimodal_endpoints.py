@@ -120,7 +120,7 @@ def test_ask_about_table_region_returns_real_answer(client, auth_headers, monkey
     class _FakeGroqClient:
         def __init__(self):
             class _Completions:
-                def create(inner_self, model, messages, max_tokens, temperature):
+                def create(inner_self, model, messages, max_tokens, temperature, **_kw):
                     return _FakeResponse("The range value is 5000 km.")
 
             class _Chat:
@@ -128,7 +128,7 @@ def test_ask_about_table_region_returns_real_answer(client, auth_headers, monkey
 
             self.chat = _Chat()
 
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient())
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient())
 
     pdf_bytes = _build_sample_pdf_bytes()
     upload = client.post(

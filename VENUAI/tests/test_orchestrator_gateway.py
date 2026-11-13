@@ -47,7 +47,7 @@ class _FakeGroqClient:
         outer = self
 
         class _Completions:
-            def create(self, model, messages, max_tokens, temperature):
+            def create(self, model, messages, max_tokens, temperature, **_kw):
                 outer.calls += 1
                 return _FakeResponse(outer.response_text)
 

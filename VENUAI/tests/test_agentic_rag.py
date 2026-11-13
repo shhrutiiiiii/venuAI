@@ -53,7 +53,7 @@ class _FakeGroqClient:
         outer = self
 
         class _Completions:
-            def create(inner_self, model, messages, max_tokens, temperature):
+            def create(inner_self, model, messages, max_tokens, temperature, **_kw):
                 outer.calls += 1
                 return _FakeResponse(outer.answer_text)
 
@@ -66,7 +66,7 @@ class _FakeGroqClient:
 def _setup(monkeypatch, docs, answer_text):
     monkeypatch.setenv("GROQ_API_KEY", "fake-key")
     monkeypatch.setattr(rag_server, "get_vector_store", lambda: _FakeVectorStore(docs))
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient(answer_text))
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient(answer_text))
     monkeypatch.setattr(
         "VENUAI.hallucination_detector.get_hallucination_detector",
         lambda: type("S", (), {"analyze": staticmethod(lambda a, d: (a, 0.0, []))})(),
@@ -101,7 +101,7 @@ def test_never_exceeds_max_retrieval_rounds(monkeypatch):
     """No evidence at all, ever — the loop must still terminate, not hang."""
     monkeypatch.setenv("GROQ_API_KEY", "fake-key")
     monkeypatch.setattr(rag_server, "get_vector_store", lambda: _FakeVectorStore([]))
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient("I don't know."))
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient("I don't know."))
     monkeypatch.setattr(
         "VENUAI.hallucination_detector.get_hallucination_detector",
         lambda: type("S", (), {"analyze": staticmethod(lambda a, d: (a, 0.0, []))})(),

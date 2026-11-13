@@ -28,7 +28,7 @@ class _FakeGroqClient:
         self.response_text = response_text
 
         class _Completions:
-            def create(inner_self, model, messages, max_tokens, temperature):
+            def create(inner_self, model, messages, max_tokens, temperature, **_kw):
                 return _FakeResponse(response_text)
 
         class _Chat:
@@ -53,7 +53,7 @@ def test_verify_node_returns_claim_level_fields(monkeypatch):
 
     # verify_node constructs its own Groq() client internally — patch the
     # class so it returns our fake instead of hitting the network.
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient())
+    monkeypatch.setattr("VENUAI.rag_server.get_groq_client", lambda *a, **k: _FakeGroqClient())
     monkeypatch.setattr("VENUAI.hallucination_detector.get_hallucination_detector", lambda: _StubHallucinationDetector())
 
     docs = [
@@ -78,7 +78,7 @@ def test_verify_node_returns_claim_level_fields(monkeypatch):
 
 def test_verify_node_flags_unsupported_claims(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "fake-key")
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient())
+    monkeypatch.setattr("VENUAI.rag_server.get_groq_client", lambda *a, **k: _FakeGroqClient())
     monkeypatch.setattr("VENUAI.hallucination_detector.get_hallucination_detector", lambda: _StubHallucinationDetector())
 
     docs = [
