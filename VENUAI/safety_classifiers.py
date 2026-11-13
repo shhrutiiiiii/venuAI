@@ -71,11 +71,11 @@ def safeguard_enabled() -> bool:
 
 def _groq_chat(model: str, messages: List[dict], max_tokens: int, timeout: float) -> str:
     """Single low-level Groq call (the one place tests patch). Short timeout, no retries."""
-    from groq import Groq
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
+    from VENUAI.ai_gateway.provider import get_groq_client
+    if not os.getenv("GROQ_API_KEY"):
         raise RuntimeError("GROQ_API_KEY not configured")
-    client = Groq(api_key=api_key, timeout=timeout, max_retries=0)
+    # central client helper; per-call short timeout and no retries for these guard calls
+    client = get_groq_client().with_options(timeout=timeout, max_retries=0)
     res = client.chat.completions.create(
         model=model, messages=messages, max_tokens=max_tokens, temperature=0.0,
     )

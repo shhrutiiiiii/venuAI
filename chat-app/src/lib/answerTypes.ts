@@ -18,6 +18,9 @@ export interface Citation {
   page?: number | null;
   quote?: string;
   verified?: boolean;
+  char_start?: number | null;
+  char_end?: number | null;
+  reason?: string | null;
 }
 
 export interface VerificationInfo {

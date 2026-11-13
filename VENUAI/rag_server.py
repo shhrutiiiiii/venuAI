@@ -943,6 +943,12 @@ def abstain_node(state: RAGGraphState) -> dict:
         "verification_flags": ["INSUFFICIENT_CONTEXT"],
         "model_used": "retrieval-abstain (no LLM call)",
         "insufficient_context": True,
+        "grounding_score": None,
+        "hallucination_score": None,
+        "verified": False,
+        "verification_reason": "insufficient_context",
+        "answer_basis": "none",
+        "citations": [],
     }
 
 
@@ -1560,25 +1566,37 @@ async def query_stream(
             mem_ctx = mm.get_context(req.session_id, req.user_id or "anonymous", req.question)
             effective_history = req.history or mem_ctx.get("working", [])
 
-            vs = get_vector_store()
-            stream_search_kwargs = {"k": req.top_k}
             allowed_doc_ids = get_visible_doc_ids(current_user)
-            if allowed_doc_ids is not None:
-                stream_search_kwargs["filter"] = {"doc_id": {"$in": allowed_doc_ids or ["__none__"]}}
-            docs = vs.as_retriever(
-                search_type="similarity", search_kwargs=stream_search_kwargs
-            ).invoke(req.question)
-
-            # Phase 5: fold in table/image region hits — the last retrieval
-            # mode (standard, Agentic RAG, ReAct, multi-agent specialists,
-            # now streaming) missing this. Best-effort.
-            try:
-                from VENUAI.multimodal_retrieval import retrieve_multimodal_documents
-                region_docs = retrieve_multimodal_documents(req.question, allowed_doc_ids, top_k=3)
-                if region_docs:
-                    docs = list(docs) + region_docs
-            except Exception as region_err:
-                logger.warning(f"[stream] multimodal region retrieval skipped: {region_err}")
+            insufficient = False
+            docs = []
+            if load_metadata():
+                # Same shared pipeline as /query (rewrite -> dense+BM25 -> RRF -> rerank ->
+                # relevance floor, multimodal regions included); runs in a worker thread.
+                from VENUAI.retrieval import retrieve_documents
+                _hist = effective_history
+                ret = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: retrieve_documents(
+                        get_vector_store(), req.question, req.top_k, allowed_doc_ids, history=_hist,
+                    )
+                )
+                docs = ret.documents
+                insufficient = ret.insufficient_context
+            if insufficient:
+                done_event = {
+                    "done": True, "sources": [], "answer": ABSTAIN_ANSWER, "citations": [],
+                    "grounding_score": None, "hallucination_score": None,
+                    "verification_flags": ["INSUFFICIENT_CONTEXT"],
+                    "verified": False, "verification_reason": "insufficient_context",
+                    "evidence_coverage": None, "unsupported_claim_count": None,
+                    "contradicted_claim_count": None, "critique_passed": False,
+                    "safety_check": None, "blocked": False, "block_reason": None,
+                    "answer_basis": "none", "answer_basis_notice": None,
+                    "quarantined_chunks": 0, "insufficient_context": True,
+                    "model": "retrieval-abstain (no LLM call)", "trace_id": trace_id,
+                }
+                yield f'data: {json.dumps({"model": done_event["model"]})}\n\n'
+                yield f"data: {json.dumps(done_event)}\n\n"
+                return
 
             ranked_docs = rank_chunks(docs, req.question)
             answer_basis = "uploaded_documents" if ranked_docs else "none"

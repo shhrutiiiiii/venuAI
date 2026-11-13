@@ -527,7 +527,7 @@ export default function ChatPage() {
                           verification_reason: typeof parsed.verification_reason === "string" ? parsed.verification_reason : msg.verification_reason,
                           sources: parsed.sources || msg.sources,
                           citations: parsed.citations || parsed.sources ? normalizeCitations(parsed.citations, parsed.sources) : msg.citations,
-                          model_used: typeof parsed.model_used === "string" ? parsed.model_used : msg.model_used,
+                          model_used: typeof parsed.model_used === "string" ? parsed.model_used : typeof parsed.model === "string" ? parsed.model : msg.model_used,
                           verification_flags: parsed.verification_flags || msg.verification_flags,
                         }
                       : msg
