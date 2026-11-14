@@ -89,10 +89,11 @@ class Session:
             except Exception:
                 pass
 
-    def query(self, question: str, top_k: int = 4) -> dict:
+    def query(self, question: str, top_k: int = 4, extra: Optional[dict] = None) -> dict:
         t0 = time.perf_counter()
-        r = self._req("post", "/query", json={"question": question, "top_k": top_k,
-                                              "session_id": f"eval-{uuid.uuid4().hex[:8]}"}, timeout=180)
+        payload = {"question": question, "top_k": top_k, "session_id": f"eval-{uuid.uuid4().hex[:8]}"}
+        payload.update(extra or {})
+        r = self._req("post", "/query", json=payload, timeout=180)
         return {"status": r.status_code, "latency_ms": (time.perf_counter() - t0) * 1000,
                 "body": r.json() if r.headers.get("content-type", "").startswith("application/json") else {"detail": r.text[:300]}}
 
@@ -137,7 +138,33 @@ def build_record(item: dict, res: dict, corpus: Dict[str, str]) -> dict:
     }
 
 
-def harvest(client, items: List[dict], out_path: Path, email=None, password=None, top_k=4, ingest=True) -> Path:
+def completed_ids(out_path: Path) -> set:
+    """ids already harvested in an existing JSONL (tolerates a truncated last line)."""
+    done = set()
+    if out_path.exists():
+        for line in out_path.read_text(encoding="utf-8").splitlines():
+            try:
+                done.add(json.loads(line)["id"])
+            except Exception:
+                continue
+    return done
+
+
+def harvest(client, items: List[dict], out_path: Path, email=None, password=None, top_k=4, ingest=True,
+            resume=False) -> Path:
+    """resume=True: keep the records already in out_path and only query the missing items (appends), so an
+    interrupted run (rate limit / daily token cap) does not repeat paid LLM calls."""
+    done = completed_ids(out_path) if resume else set()
+    if resume and out_path.exists():  # drop a truncated trailing line so appended records stay valid JSONL
+        good = []
+        for line in out_path.read_text(encoding="utf-8").splitlines():
+            try:
+                json.loads(line)
+                good.append(line)
+            except Exception:
+                continue
+        out_path.write_text("".join(g + chr(10) for g in good), encoding="utf-8")
+    items = [it for it in items if it["id"] not in done]
     corpus_docs = load_corpus()
     corpus = {d["id"]: d["text"] for d in corpus_docs}
     sess = Session(client, email, password)
@@ -145,7 +172,7 @@ def harvest(client, items: List[dict], out_path: Path, email=None, password=None
         if ingest:
             sess.ingest(corpus_docs)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "w", encoding="utf-8") as f:
+        with open(out_path, "a" if resume else "w", encoding="utf-8") as f:
             for it in items:
                 rec = build_record(it, sess.query(it["question"], top_k), corpus)
                 if rec["status"] >= 500:

@@ -65,7 +65,10 @@ def do_score(items, jsonl, args, name):
         import os
         if not os.getenv("GROQ_API_KEY"):
             raise HarvestError("--judge needs GROQ_API_KEY (env or VENUAI/.env)")
-        from VENUAI.evals.judge import Judge
+        from VENUAI.evals.judge import Judge, key_isolation_status
+        iso = key_isolation_status()
+        if not iso["isolated"]:
+            print(f"WARNING judge key isolation: {iso['reason']}", file=sys.stderr)
         judge = Judge()
     rep = S.score(items, S.load_jsonl(jsonl), judge)
     deltas = None
@@ -94,6 +97,7 @@ def main(argv=None):
     ap.add_argument("--top-k", type=int, default=4)
     ap.add_argument("--no-ingest", action="store_true", help="assume the eval corpus is already ingested")
     ap.add_argument("--harvest-file", help="JSONL path (harvest output / score input)")
+    ap.add_argument("--resume", action="store_true", help="harvest: skip ids already in --harvest-file")
     ap.add_argument("--judge", action="store_true")
     ap.add_argument("--compare", help="previous report JSON for regression deltas")
     ap.add_argument("--gate", action="store_true", help="exit 1 if thresholds.json is violated")
@@ -111,7 +115,7 @@ def main(argv=None):
     items = load_items(a.dataset, a.limit)
     try:
         if a.cmd in ("harvest", "run"):
-            harvest(make_client(a.base_url), items, jsonl, a.email, a.password, a.top_k, not a.no_ingest)
+            harvest(make_client(a.base_url), items, jsonl, a.email, a.password, a.top_k, not a.no_ingest, resume=a.resume)
             print(f"harvest: {jsonl}")
         if a.cmd in ("score", "run"):
             return do_score(items, jsonl, a, f"eval_{stamp}")

@@ -85,3 +85,27 @@ New ADRs should be appended here, never inserted out of order — each ADR numbe
 
 ## Notes for Developers
 If you make a decision that a future reader would otherwise have to reverse-engineer from a diff, write it here in the same change.
+
+### ADR-B11: Graph retrieval via Personalized PageRank (HippoRAG-2 style), multi-hop only
+**Context:** Dense/BM25 retrieval cannot connect facts that live in different documents (A mentions X and Y, B mentions Y and Z). The knowledge graph already links documents to entities (`/upload` auto-population).
+**Decision:** `kg_retrieval.retrieve_graph(query, tenant_id, allowed_doc_ids, k, *, vs=None)` seeds entities by name match (20b NER only if `KG_NER_LLM=on` and nothing matched), runs PPR (damping 0.5, numpy power iteration, no new dependency) over an entity + per-document passage graph, then returns the best chunks of the top documents with `retriever="kg_ppr"` and an explainable `kg_path`. Tenant isolation: only the tenant graph is read; with an ACL, edges whose document is not authorised are dropped before PPR and results are filtered again. B1 calls it as a third RRF source only for multi-hop-classified queries under `KG_RETRIEVAL=on`. Stores gained `list_entities` / `list_relationships`.
+**Consequence:** Works on the document-level graph that exists today (documents-mention-entities); precision improves if richer LLM extraction (`/graph/extract`) populates entity-entity edges. Any failure returns `[]`.
+
+### ADR-B12: RAPTOR summaries are optional and token-budgeted
+**Decision:** `raptor.py` (default `RAPTOR=off`) clusters chunk embeddings (KMeans), summarises clusters with the fast model (low effort) in at most `RAPTOR_MAX_CALLS` (6) calls per document over 2 levels, stores them in a separate Chroma collection `summaries` tagged tenant/doc/level, and exposes `retrieve_summaries` / `delete_summaries`. **Consequence:** summaries are LLM paraphrases, so they are retrieval aids; answers should still cite original chunks.
+
+### ADR-B13: Local faithfulness never fakes a score
+**Decision:** `local_faithfulness.score_claims` loads HHEM-2.1-open (or `LOCAL_FAITHFULNESS_MODEL`) and falls back to the already-used NLI cross-encoder, both from the local cache only (`LOCAL_FAITHFULNESS_DOWNLOAD=on` to fetch). No backend or no checkable claim means `score: None` with a reason. Exposed via `VerificationPipelineResult.local_faithfulness` when `LOCAL_FAITHFULNESS=on`. **Consequence:** NLI models are weak on numeric paraphrase (5000 km vs "5,000 - 8,000 km" can score low); treat the score as a signal, not a verdict. `find_contradictions` is deterministic (same-unit numeric conflicts >= 15% across different documents).
+
+### ADR-B14: PII redaction and safety-classifier routing
+**Decision:** `pii_redaction.redact/redact_obj` mask e-mail, Aadhaar (Verhoeff), cards (Luhn), PAN, phones, API keys/JWT/PEM and `password=` pairs; classification markings are kept. Guardrail audit logs use the full `redact`; user-facing answers use the narrower `redact_identifiers` (IDs and secrets only, because public contact details are legitimate). Safety classifiers resolve model ids from registry capabilities (`SAFETY`, `PROMPT_GUARD`) as an ordered fallback chain with telemetry, through the central Groq client; `*_MODEL` overrides the head and `*_FALLBACK_MODELS` appends (the 22m prompt guard is not in the registry, so it is opt-in via env).
+
+### ADR-B15: Embedding model is opt-in and never re-indexed automatically
+**Decision:** `embeddings_config.get_embeddings()` reads `EMBEDDING_MODEL` (MiniLM default). `scripts/reindex.py` re-embeds into a NEW Chroma directory (dry-run unless `--run`, refuses non-empty targets) and never touches the live index. **Consequence:** switching requires an explicit operator step; the existing mismatch warning in `rag_server` covers a wrong combination.
+
+### ADR-B16: The built-in knowledge base is chunked per entry
+**Context:** the KB fallback fed `json.dumps(kb)[:8000]` as one document, so verification compared claims to a raw JSON dump (grounding about 0.1) and no entry could be cited.
+**Decision:** `kb_documents.py` renders each organisation / cluster / laboratory / weapon-platform entry as a readable Document (`title`, `kb_entry_id`, `doc_id=kb:<id>`, `kb_fallback=True`, filename "Built-in knowledge base (not from your documents) - <title>") and retrieves with BM25-style scoring. `kb_fallback_documents(question, k)` is the helper for fallback paths; specialist agents already use it. **Consequence:** claims verify against the matching entry; the KB is still labelled as built-in, never as the user's documents.
+
+### ADR-B17: Eval additions are dry-run first
+**Decision:** `semantic_cache_sweep`, `calibration`, `reasoning_experiment`, `chunk_size_sweep` added; `harvest --resume`; judge key isolation (`EVAL_JUDGE_API_KEY`); five poisoned-document cases with exact canaries. Anything that spends Groq tokens needs `--live`. **Finding:** with MiniLM, near-miss pairs (AURORA-XB vs AURORA-X, Agni-V vs Agni-IV) reach cosine >= 0.93 in 2 of 4 cases while only 1 of 4 paraphrases does, so a 0.93 semantic cache tier can serve wrong answers; keep it off or raise the threshold (>= 0.98 on this sample) and rely on the exact-hash tier.

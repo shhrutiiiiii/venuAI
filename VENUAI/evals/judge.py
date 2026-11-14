@@ -41,6 +41,21 @@ def _ctx_block(chunks: List[str], limit: int = 1200) -> str:
     return "\n".join(f"[{i + 1}] {c[:limit]}" for i, c in enumerate(chunks))
 
 
+def judge_api_key():
+    """The judge uses EVAL_JUDGE_API_KEY when set (separate quota/account from the generator), else GROQ_API_KEY."""
+    return os.getenv("EVAL_JUDGE_API_KEY") or os.getenv("GROQ_API_KEY")
+
+
+def key_isolation_status() -> dict:
+    """Is the judge key isolated from the generation key? Never returns key material."""
+    gen, judge = os.getenv("GROQ_API_KEY"), os.getenv("EVAL_JUDGE_API_KEY")
+    if not judge:
+        return {"isolated": False, "reason": "EVAL_JUDGE_API_KEY not set; judge shares the generation key/quota"}
+    if judge == gen:
+        return {"isolated": False, "reason": "EVAL_JUDGE_API_KEY equals GROQ_API_KEY"}
+    return {"isolated": True, "reason": "separate judge key configured"}
+
+
 class Judge:
     def __init__(self, call_fn: Optional[Callable[[str, str], str]] = None,
                  model: str = JUDGE_MODEL, cache_dir: Optional[Path] = CACHE_DIR,
@@ -56,9 +71,9 @@ class Judge:
 
     def _groq_call(self, system: str, user: str) -> str:
         from groq import Groq
-        key = os.getenv("GROQ_API_KEY")
+        key = judge_api_key()
         if not key:
-            raise JudgeError("GROQ_API_KEY not set; cannot run LLM judge")
+            raise JudgeError("neither EVAL_JUDGE_API_KEY nor GROQ_API_KEY is set; cannot run LLM judge")
         client = getattr(self, "_client", None) or Groq(api_key=key)
         self._client = client
         resp = client.chat.completions.create(
