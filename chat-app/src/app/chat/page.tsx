@@ -57,6 +57,19 @@ import { answerToMarkdown, cleanScore, normalizeCitations, type Citation } from 
 import { AgentModeToggle, AgentMode } from "@/components/AgentModeToggle";
 import { StreamingMessage } from "@/components/StreamingMessage";
 import DataAnalystWorkspace from "@/components/DataAnalystWorkspace";
+import { StepTimeline } from "@/components/StepTimeline";
+import { TraceButton } from "@/components/TraceDrawer";
+import { FollowupChips } from "@/components/FollowupChips";
+import { AnswerMetaChips } from "@/components/AnswerMetaChips";
+import { ContradictionNotice } from "@/components/ContradictionNotice";
+import { SourceViewerButton } from "@/components/SourceViewer";
+import { ResearchFlow } from "@/components/ResearchFlow";
+import { VoiceButton, SpeakButton } from "@/components/VoiceButton";
+import { MemoryButton } from "@/components/MemoryPanel";
+import { ApprovalDialog } from "@/components/ApprovalDialog";
+import { applyStep, readSse, type TimelineStep } from "@/lib/sse";
+import { useCapabilities } from "@/lib/useCapabilities";
+import type { PendingApproval, QueryExtras, ResearchDepth } from "@/lib/apiContracts";
 
 // ─── Error Formatting Helper ──────────────────────────────────────────────────
 
@@ -141,6 +154,12 @@ interface RagMessage {
   question?: string;
   research?: ResearchData;
   researchPending?: boolean;
+  /** Deep Research v2 (plan -> job -> report) flow, rendered by <ResearchFlow>. */
+  researchFlow?: { depth: ResearchDepth; docIds?: string[] };
+  /** Live pipeline steps from /query/stream `{"step":...}` events. */
+  steps?: TimelineStep[];
+  /** Additive Wave B response fields (cache, model path, followups, trace id, ...). */
+  extras?: QueryExtras;
   agent_mode?: AgentMode;
   isStreaming?: boolean;
   isError?: boolean;
@@ -248,6 +267,24 @@ const TEAM_MESSAGES = [
 
 // ─── Main AI Agent Workspace ──────────────────────────────────────────────────
 
+// Picks only well-typed Wave B fields; anything missing stays undefined (never defaulted to a made-up value).
+function extractExtras(d: Record<string, unknown>): QueryExtras {
+  const out: QueryExtras = {};
+  if (Array.isArray(d.retrieved_chunks)) out.retrieved_chunks = d.retrieved_chunks as QueryExtras["retrieved_chunks"];
+  if (d.usage && typeof d.usage === "object") out.usage = d.usage as QueryExtras["usage"];
+  if (typeof d.ttft_ms === "number") out.ttft_ms = d.ttft_ms;
+  if (typeof d.latency_ms === "number") out.latency_ms = d.latency_ms;
+  if (typeof d.cache_hit === "boolean") out.cache_hit = d.cache_hit;
+  if (Array.isArray(d.model_path)) out.model_path = d.model_path.filter((x): x is string => typeof x === "string");
+  if (Array.isArray(d.followups)) out.followups = d.followups.filter((x): x is string => typeof x === "string");
+  if (Array.isArray(d.contradictions)) out.contradictions = d.contradictions as QueryExtras["contradictions"];
+  if (d.corrective && typeof d.corrective === "object") out.corrective = d.corrective as QueryExtras["corrective"];
+  if (typeof d.trace_id === "string" && d.trace_id) out.trace_id = d.trace_id;
+  if (Array.isArray(d.memories_used)) out.memories_used = d.memories_used as QueryExtras["memories_used"];
+  if (d.pending_approval && typeof d.pending_approval === "object") out.pending_approval = d.pending_approval as PendingApproval;
+  return out;
+}
+
 export default function ChatPage() {
   const { user, isLoading, isAuthenticated, logout } = useAuth();
   const router = useRouter();
@@ -285,6 +322,10 @@ export default function ChatPage() {
   const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
   const [agentMode, setAgentMode] = useState<AgentMode>("rag");
   const [useStreaming, setUseStreaming] = useState(true);
+  const caps = useCapabilities();
+  const [researchDepth, setResearchDepth] = useState<ResearchDepth>("quick");
+  const [scopeDocId, setScopeDocId] = useState<string>("");
+  const [approval, setApproval] = useState<{ msgId: string; data: PendingApproval; busy: boolean; error: string | null } | null>(null);
   const ragFileInputRef = useRef<HTMLInputElement>(null);
   const ragMessagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -460,11 +501,17 @@ export default function ChatPage() {
       agent_mode: agentMode,
       isStreaming: useStreaming && !deepResearch,
       question,
-      researchPending: deepResearch,
+      researchPending: deepResearch && !caps.research_jobs,
+      researchFlow: deepResearch && caps.research_jobs ? { depth: researchDepth, docIds: scopeDocId ? [scopeDocId] : undefined } : undefined,
     };
     setRagMessages((prev) => [...prev, placeholderMsg]);
 
     if (deepResearch) {
+      if (caps.research_jobs) {
+        // Plan/progress/report are driven by <ResearchFlow>; it calls back into the legacy path if the jobs API is unavailable.
+        setRagLoading(false);
+        return;
+      }
       await runDeepResearch(question, aiMsgId);
       return;
     }
@@ -472,9 +519,11 @@ export default function ChatPage() {
     const requestBody = {
       question,
       top_k: 4,
-      history: ragMessages,
+      // Slim history: never resend steps / passages / extras of earlier turns.
+      history: ragMessages.map((m) => ({ id: m.id, sender: m.sender, text: m.text, timestamp: m.timestamp })),
       agent_mode: agentMode === "react",
       multi_agent_mode: agentMode === "multi_agent",
+      ...(scopeDocId ? { doc_ids: [scopeDocId] } : {}),
     };
 
     if (useStreaming) {
@@ -489,68 +538,47 @@ export default function ChatPage() {
           throw new Error("Streaming connection failed.");
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder("utf-8");
+        const patch = (fn: (m: RagMessage) => Partial<RagMessage>) =>
+          setRagMessages((prev) => prev.map((m) => (m.id === aiMsgId ? { ...m, ...fn(m) } : m)));
         let accumulatedText = "";
+        let streamError: string | null = null;
+        let pendingApproval: PendingApproval | undefined;
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split("\n");
-
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const dataStr = line.replace("data: ", "").trim();
-              if (dataStr === "[DONE]") break;
-              try {
-                const parsed = JSON.parse(dataStr);
-                if (parsed.token) {
-                  // Accumulating streamed SSE tokens into a local `let`
-                  // inside this async reader loop — plain imperative code
-                  // in an event-driven async function, not a render body.
-                  // eslint-disable-next-line react-hooks/immutability
-                  accumulatedText += parsed.token;
-                } else if (parsed.answer) {
-                  accumulatedText = parsed.answer;
-                }
-                setRagMessages((prev) =>
-                  prev.map((msg) =>
-                    msg.id === aiMsgId
-                      ? {
-                          ...msg,
-                          text: accumulatedText,
-                          // The stream "done" score is not a verified measurement
-                          // unless the backend marks verified === true.
-                          grounding_score: parsed.verified === true ? cleanScore(parsed.grounding_score) ?? msg.grounding_score : msg.grounding_score,
-                          verified: typeof parsed.verified === "boolean" ? parsed.verified : msg.verified,
-                          verification_reason: typeof parsed.verification_reason === "string" ? parsed.verification_reason : msg.verification_reason,
-                          sources: parsed.sources || msg.sources,
-                          citations: parsed.citations || parsed.sources ? normalizeCitations(parsed.citations, parsed.sources) : msg.citations,
-                          model_used: typeof parsed.model_used === "string" ? parsed.model_used : typeof parsed.model === "string" ? parsed.model : msg.model_used,
-                          verification_flags: parsed.verification_flags || msg.verification_flags,
-                        }
-                      : msg
-                  )
-                );
-              } catch {
-                // Raw token string fallback
-                if (dataStr && !dataStr.startsWith("{")) {
-                  accumulatedText += dataStr;
-                  setRagMessages((prev) =>
-                    prev.map((msg) => (msg.id === aiMsgId ? { ...msg, text: accumulatedText } : msg))
-                  );
-                }
-              }
-            }
+        await readSse(response.body, (ev) => {
+          if (ev.kind === "step") {
+            patch((m) => ({ steps: applyStep(m.steps ?? [], ev.step) }));
+          } else if (ev.kind === "token") {
+            accumulatedText += ev.token;
+            patch(() => ({ text: accumulatedText }));
+          } else if (ev.kind === "text") {
+            accumulatedText += ev.text;
+            patch(() => ({ text: accumulatedText }));
+          } else if (ev.kind === "error") {
+            streamError = ev.message;
+          } else if (ev.kind === "done") {
+            const d = ev.data;
+            if (typeof d.answer === "string" && d.answer) accumulatedText = d.answer;
+            pendingApproval = extractExtras(d).pending_approval ?? undefined;
+            patch((m) => ({
+              text: accumulatedText,
+              // The stream "done" score is not a verified measurement unless the backend marks verified === true.
+              grounding_score: d.verified === true ? cleanScore(d.grounding_score) ?? m.grounding_score : m.grounding_score,
+              verified: typeof d.verified === "boolean" ? d.verified : m.verified,
+              verification_reason: typeof d.verification_reason === "string" ? d.verification_reason : m.verification_reason,
+              sources: (d.sources as RagSource[] | undefined) || m.sources,
+              citations: d.citations || d.sources ? normalizeCitations(d.citations as Citation[] | undefined, d.sources as RagSource[] | undefined) : m.citations,
+              model_used: typeof d.model_used === "string" ? d.model_used : typeof d.model === "string" ? d.model : m.model_used,
+              verification_flags: (d.verification_flags as string[] | undefined) || m.verification_flags,
+              extras: { ...m.extras, ...extractExtras(d) },
+            }));
           }
-        }
+          // "progress" / "unknown" events are ignored by design.
+        });
 
-        setRagMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === aiMsgId ? { ...msg, isStreaming: false } : msg
-          )
-        );
+        if (streamError && !accumulatedText) throw new Error(streamError);
+
+        setRagMessages((prev) => prev.map((msg) => (msg.id === aiMsgId ? { ...msg, isStreaming: false } : msg)));
+        if (pendingApproval) setApproval({ msgId: aiMsgId, data: pendingApproval, busy: false, error: null });
       } catch {
         // Stream fallback to standard endpoint
         fetchStandardRagQuery(requestBody, aiMsgId);
@@ -586,6 +614,7 @@ export default function ChatPage() {
         guardFlag?.replace(/^GUARDRAIL_TRIGGERED:?\s*/, "") ||
         undefined,
       model_used: typeof data.model_used === "string" ? data.model_used : undefined,
+      extras: extractExtras(data),
     };
   };
 
@@ -628,6 +657,58 @@ export default function ChatPage() {
     }
   };
 
+  const fallbackToLegacyResearch = (msgId: string, question: string) => {
+    setRagMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, researchFlow: undefined, researchPending: true } : m)));
+    setRagLoading(true);
+    void runDeepResearch(question, msgId);
+  };
+
+  // Approval decision -> (optionally) resume the paused run and replace the message with the final answer.
+  const decideApproval = async (approve: boolean, remember: boolean) => {
+    if (!approval) return;
+    const { msgId, data } = approval;
+    setApproval({ ...approval, busy: true, error: null });
+    try {
+      const r = await fetch(`/api/approvals/${encodeURIComponent(data.id)}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approve, remember }),
+      });
+      if (!r.ok) {
+        setApproval({ msgId, data, busy: false, error: `Could not record the decision (${r.status}).` });
+        return;
+      }
+      if (!approve) {
+        setRagMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, extras: { ...m.extras, pending_approval: null }, text: `${m.text}
+
+The tool call "${data.tool}" was denied.`.trim() } : m)));
+        setApproval(null);
+        return;
+      }
+      if (!caps.resume) {
+        setRagMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, extras: { ...m.extras, pending_approval: null } } : m)));
+        setApproval(null);
+        return;
+      }
+      const res = await fetch("/api/rag/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approval_id: data.id }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setApproval({ msgId, data, busy: false, error: extractErrorMessage(body, "Could not resume the run.") });
+        return;
+      }
+      const mapped = mapQueryResponse(body as Record<string, unknown>);
+      setRagMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, ...mapped, isError: false } : m)));
+      const next = (mapped.extras ?? {}).pending_approval;
+      setApproval(next ? { msgId, data: next, busy: false, error: null } : null);
+    } catch {
+      setApproval({ msgId, data, busy: false, error: "Cannot reach the server." });
+    }
+  };
+
   const fetchStandardRagQuery = async (requestBody: Record<string, unknown>, aiMsgId: string) => {
     try {
       const res = await fetch("/api/rag/query", {
@@ -636,6 +717,7 @@ export default function ChatPage() {
         body: JSON.stringify(requestBody),
       });
       const data = await res.json();
+      if (res.ok && data?.pending_approval) setApproval({ msgId: aiMsgId, data: data.pending_approval as PendingApproval, busy: false, error: null });
       setRagMessages((prev) =>
         prev.map((msg) =>
           msg.id === aiMsgId
@@ -1306,7 +1388,29 @@ export default function ChatPage() {
                             </div>
                           </div>
 
-                          {msg.researchPending ? (
+                          {!msg.isStreaming && msg.extras && !msg.isError && (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <AnswerMetaChips extras={msg.extras} />
+                              {caps.traces && msg.extras.trace_id && <TraceButton traceId={msg.extras.trace_id} />}
+                              <SourceViewerButton chunks={msg.extras.retrieved_chunks} citations={msg.citations} />
+                              {msg.extras.memories_used && msg.extras.memories_used.length > 0 && (
+                                <span className="text-[10px]" style={{ color: "var(--text-subtle)" }} title={msg.extras.memories_used.map((m) => m.text).join("
+")}>
+                                  used {msg.extras.memories_used.length} memor{msg.extras.memories_used.length === 1 ? "y" : "ies"}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {msg.steps && msg.steps.length > 0 && !msg.researchFlow && <StepTimeline steps={msg.steps} live={!!msg.isStreaming} />}
+
+                          {msg.researchFlow ? (
+                            <ResearchFlow
+                              question={msg.question || ""}
+                              depth={msg.researchFlow.depth}
+                              docIds={msg.researchFlow.docIds}
+                              onFallback={() => fallbackToLegacyResearch(msg.id, msg.question || "")}
+                            />
+                          ) : msg.researchPending ? (
                             <ResearchPending question={msg.question || ""} />
                           ) : msg.research ? (
                             <ResearchReport data={msg.research} />
@@ -1348,6 +1452,15 @@ export default function ChatPage() {
                                     })}
                                     title={ragMessages[ragMessages.findIndex((m) => m.id === msg.id) - 1]?.text || "answer"}
                                   />
+                                  <SpeakButton text={msg.text} />
+                                  <ContradictionNotice contradictions={msg.extras?.contradictions} />
+                                  {msg.extras?.pending_approval && !approval && (
+                                    <p className="text-[11px] text-amber-500">
+                                      This answer is waiting for tool approval
+                                      {caps.approvals ? "." : ", but the approvals service is not available."}
+                                    </p>
+                                  )}
+                                  <FollowupChips followups={msg.extras?.followups} onPick={(q) => handleRagQuery(q)} disabled={ragLoading} />
                                 </>
                               )}
                             </div>
