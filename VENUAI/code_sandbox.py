@@ -25,7 +25,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger("drdo-rag")
 
@@ -35,6 +35,19 @@ MAX_TIMEOUT_SECONDS = 30
 MAX_OUTPUT_CHARS = 8000
 MEMORY_LIMIT = "256m"
 PIDS_LIMIT = "64"
+
+
+class SandboxApprovalDenied(RuntimeError):
+    """The registered approval hook refused this execution (see set_approval_hook)."""
+
+
+_approval_hook: Optional[Callable[[str], bool]] = None
+
+
+def set_approval_hook(hook: Optional[Callable[[str], bool]]) -> None:
+    """Optional human-in-the-loop gate (Wave B / B3): `hook(code) -> bool`. Default None = no gate."""
+    global _approval_hook
+    _approval_hook = hook
 
 
 class SandboxUnavailableError(RuntimeError):
@@ -79,6 +92,8 @@ def run_python(code: str, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> San
     container crash or Docker error surfaces as a real, non-zero
     `exit_code` with the real stderr, not a swallowed exception.
     """
+    if _approval_hook is not None and not _approval_hook(code):
+        raise SandboxApprovalDenied("code execution was not approved")
     if not is_available():
         raise SandboxUnavailableError(
             "Docker is not available on this host — sandboxed code execution requires a "

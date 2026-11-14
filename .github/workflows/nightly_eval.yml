@@ -1,0 +1,42 @@
+name: Nightly eval replay
+
+# Manual dispatch only until a GROQ_API_KEY secret exists and the repo variable
+# NIGHTLY_EVAL_ENABLED is set to "true"; then the schedule below becomes active.
+# Live evals spend Groq tokens, so the job is also skipped when the key is absent.
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Number of golden questions to replay"
+        default: "10"
+  schedule:
+    - cron: "0 2 * * *"
+
+jobs:
+  replay:
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.NIGHTLY_EVAL_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      JWT_SECRET_KEY: ci-only-secret-never-used-outside-ci-runners
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend dependencies
+        run: pip install -r VENUAI/requirements.txt
+      - name: Replay golden set with judge and gate
+        run: |
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "GROQ_API_KEY secret not set - skipping live eval"
+          else
+            python -m VENUAI.evals.eval_runner run --limit "${{ github.event.inputs.limit || '10' }}" --judge --gate --out-dir eval-out
+          fi
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-eval-report
+          path: eval-out
+          if-no-files-found: ignore

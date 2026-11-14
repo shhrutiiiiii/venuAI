@@ -112,4 +112,17 @@ def summary() -> dict:
             "success_rate": round(succ / total, 3),
             "avg_latency_ms": round(avg_latency, 1) if avg_latency else None,
             "fallback_rate": round(fallbacks / total, 3),
+            "latency": latency_percentiles(),
         }
+
+
+def latency_percentiles(window: int = 1000) -> dict:
+    """p50/p95 latency of the last `window` successful gateway calls (null when no data)."""
+    with _get_conn() as conn:
+        vals = sorted(r[0] for r in conn.execute(
+            "SELECT latency_ms FROM model_routing_log WHERE success = 1 AND latency_ms IS NOT NULL "
+            "ORDER BY id DESC LIMIT ?", (window,)).fetchall())
+    if not vals:
+        return {"p50": None, "p95": None, "n": 0}
+    pick = lambda q: round(vals[min(len(vals) - 1, int(round(q * (len(vals) - 1))))], 1)
+    return {"p50": pick(0.5), "p95": pick(0.95), "n": len(vals)}

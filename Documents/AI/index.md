@@ -49,6 +49,7 @@ A generated answer, sources, and quality scores (mode-dependent — see [`workfl
 - [`trust-and-safety.md`](trust-and-safety.md) — guardrails on every path, injection defence, quote-verified citations, fail-closed verification.
 - [`evidence-explorer.md`](evidence-explorer.md) — persisted claim-by-claim verification results, browsable after the fact (Phase 4).
 - [`code-sandbox.md`](code-sandbox.md) — real, Docker-isolated code execution for the ReAct agent (Phase 5).
+- [`observability.md`](observability.md) / [`agent-protocols.md`](agent-protocols.md) — tracing, online evals, tool platform, approvals, MCP 2025-11-25, A2A (Wave B / B3).
 - [`mcp-deployment.md`](mcp-deployment.md) — the MCP server's real SDK-compatibility fix and its new authenticated HTTP transport (Phase 5).
 
 ## Interactions with Other Services
