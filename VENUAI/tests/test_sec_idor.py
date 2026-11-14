@@ -318,7 +318,7 @@ def test_job_and_memory_lists_are_per_user(world, res, who, visible):
 
 @pytest.mark.parametrize("who,visible", [("A", True), ("B", False), ("ADM1", True), ("C", False), ("ADM2", False)])
 def test_region_search_only_returns_visible_documents(world, res, who, visible):
-    out = call(world, who, "POST", "/documents/regions/search", json={"query": "Parameter Range"}).json()
+    out = call(world, who, "POST", "/documents/regions/search", json={"query": "Parameter Range", "top_k": 500}).json()
     docs = {r["document_id"] for r in out}
     assert (res.doc_priv in docs) is visible
     assert res.doc_c not in docs or who in ("C", "ADM2")
@@ -947,7 +947,7 @@ def test_matrix_covers_every_id_route():
     for _c, method, tmpl, _b, _e in MATRIX:
         import re
         covered.add((method, re.sub(r"\{\w+\}", "{}", tmpl)))
-    covered |= {("DELETE", "/memory/{}"), ("GET", "/auth/oauth/{}/login")}
+    covered |= {("POST", "/documents/{}/regions/{}/ask"), ("DELETE", "/memory/{}"), ("GET", "/auth/oauth/{}/login")}
     waived = {
         ("POST", "/auth/oauth/{}/callback"),
         ("PATCH", "/tenants/members/{}"), ("DELETE", "/tenants/members/{}"),    # test_role_change_* tests

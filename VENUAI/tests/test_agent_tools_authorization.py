@@ -105,7 +105,7 @@ def test_document_summary_tool_rejects_unauthorized_doc(monkeypatch):
     assert "a.pdf" in own_doc
 
     other_doc = summary_tool.invoke({"doc_id": "doc-other"})
-    assert "not authorized" in other_doc.lower()
+    assert "not found" in other_doc.lower()  # uniform with missing ids (no existence oracle)
 
 
 def test_memory_recall_tool_does_not_expose_user_id_parameter():
