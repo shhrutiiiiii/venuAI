@@ -208,7 +208,14 @@ def test_tenant_budget_downshift_then_refuse(tmp_path, monkeypatch):
     assert token_budget.tenant_status("t") == "ok"
 
 
-def test_request_ceiling_raises_before_next_call():
+@pytest.fixture()
+def _clean_meter():
+    tok = usage._current.set(None)
+    yield
+    usage._current.reset(tok)
+
+
+def test_request_ceiling_raises_before_next_call(_clean_meter):
     m = usage.start_meter(100)
     m.record("m", "generation", 60, 50, 1.0)
     with pytest.raises(usage.BudgetExceeded):
