@@ -25,6 +25,10 @@ from typing import List, Optional
 
 logger = logging.getLogger("drdo-rag")
 
+_MODULE_DIR = Path(__file__).resolve().parent
+DEFAULT_DB_PATH = str(_MODULE_DIR / "venuai_memory.db")
+DEFAULT_CHROMA_DIR = str(_MODULE_DIR / "chroma_db")
+
 # ── DRDO entity patterns for key-fact extraction ───────────────────────────────
 _LAB_CODES = re.compile(
     r"\b(DRDL|RCI|ASL|LRDE|DLRL|DEAL|ADE|GTRE|CABS|CVRDE|ARDE|HEMRL|"
@@ -78,16 +82,18 @@ class MemoryManager:
     Tier 3 — Semantic Memory (ChromaDB 'user_memory' collection, vector-searchable)
     """
 
-    def __init__(self, db_path: str = "VENUAI/venuai_memory.db") -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize the SQLite database and create tables if they don't exist.
         The ChromaDB collection is created lazily on first use to avoid
         loading the embedding model at import time.
 
         Args:
-            db_path: Path to the SQLite database file.
+            db_path: Path to the SQLite database file. Defaults to
+                     VENUAI/venuai_memory.db next to this module, i.e. the same
+                     file regardless of the process working directory.
         """
-        self._db_path = str(Path(db_path).resolve())
+        self._db_path = str(Path(db_path).resolve()) if db_path else DEFAULT_DB_PATH
         # Working memory is keyed by (tenant_id, user_id, session_id). It used to be
         # keyed by session_id alone, and the API default session id is the shared
         # string "default-session", so every user who did not pass a session id
@@ -110,21 +116,15 @@ class MemoryManager:
                     user_id     TEXT NOT NULL,
                     user_msg    TEXT NOT NULL,
                     ai_msg      TEXT NOT NULL,
-                    timestamp   TEXT NOT NULL
+                    timestamp   TEXT NOT NULL,
+                    tenant_id   TEXT NOT NULL DEFAULT 'default'
                 )
             """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    session_id  TEXT PRIMARY KEY,
-                    user_id     TEXT NOT NULL,
-                    summary     TEXT NOT NULL,
-                    start_time  TEXT NOT NULL,
-                    end_time    TEXT NOT NULL,
-                    turn_count  INTEGER DEFAULT 0
-                )
-            """)
+            self._add_column(conn, "turns", "tenant_id", "TEXT NOT NULL DEFAULT 'default'")
+            self._migrate_sessions(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_user ON turns(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_scope ON turns(tenant_id, user_id, session_id)")
             # Tier 4 — Research Memory: findings produced by DeepResearchAgent
             # (VENUAI/agents/deep_research_agent.py), keyed by a research_id so
             # a long-running research task's results can be retrieved later.
@@ -138,12 +138,50 @@ class MemoryManager:
                     answer          TEXT NOT NULL,
                     evidence_coverage REAL NOT NULL DEFAULT 0.0,
                     critique_passed INTEGER NOT NULL DEFAULT 0,
-                    timestamp       TEXT NOT NULL
+                    timestamp       TEXT NOT NULL,
+                    tenant_id       TEXT NOT NULL DEFAULT 'default'
                 )
             """)
+            self._add_column(conn, "research_findings", "tenant_id", "TEXT NOT NULL DEFAULT 'default'")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_research_user ON research_findings(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_research_id ON research_findings(research_id)")
             conn.commit()
+
+    @staticmethod
+    def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+    @staticmethod
+    def _migrate_sessions(conn: sqlite3.Connection) -> None:
+        """`sessions` used to have PRIMARY KEY(session_id): two users (or tenants)
+        sharing a session id overwrote each other's summary (INSERT OR REPLACE)
+        and read each other's rows. The key is now (tenant_id, user_id, session_id).
+        Legacy rows are carried over under the 'default' tenant."""
+        info = conn.execute("PRAGMA table_info(sessions)").fetchall()
+        pk_cols = {r[1] for r in info if r[5]}
+        if info and pk_cols == {"tenant_id", "user_id", "session_id"}:
+            return
+        if info:
+            conn.execute("ALTER TABLE sessions RENAME TO sessions_legacy")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                tenant_id   TEXT NOT NULL DEFAULT 'default',
+                user_id     TEXT NOT NULL,
+                session_id  TEXT NOT NULL,
+                summary     TEXT NOT NULL,
+                start_time  TEXT NOT NULL,
+                end_time    TEXT NOT NULL,
+                turn_count  INTEGER DEFAULT 0,
+                PRIMARY KEY (tenant_id, user_id, session_id)
+            )
+        """)
+        if info:
+            conn.execute(
+                "INSERT OR IGNORE INTO sessions (tenant_id, user_id, session_id, summary, start_time, end_time, turn_count) "
+                "SELECT 'default', user_id, session_id, summary, start_time, end_time, turn_count FROM sessions_legacy")
+            conn.execute("DROP TABLE sessions_legacy")
 
     # ── Lazy ChromaDB accessor ────────────────────────────────────────────────
 
@@ -162,7 +200,7 @@ class MemoryManager:
             embed_fn = SentenceTransformerEmbeddingFunction(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
-            client = PersistentClient(path="VENUAI/chroma_db")
+            client = PersistentClient(path=DEFAULT_CHROMA_DIR)
             self._chroma_collection = client.get_or_create_collection(
                 name="user_memory",
                 embedding_function=embed_fn,
@@ -178,7 +216,12 @@ class MemoryManager:
 
     @staticmethod
     def _wkey(tenant_id: Optional[str], user_id: str, session_id: str) -> tuple:
-        return (tenant_id or "default", user_id or "anonymous", session_id or "")
+        from VENUAI.authz import normalize_session_id
+        return (tenant_id or "default", user_id or "anonymous", normalize_session_id(session_id or "x"))
+
+    def scoped(self, tenant_id: str) -> "_TenantMemory":
+        """A view bound to one tenant, so handlers cannot forget the tenant."""
+        return _TenantMemory(self, tenant_id)
 
     def save_turn(
         self,
@@ -223,9 +266,9 @@ class MemoryManager:
         try:
             with sqlite3.connect(self._db_path) as conn:
                 conn.execute(
-                    "INSERT INTO turns (session_id, user_id, user_msg, ai_msg, timestamp) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (session_id, user_id, user_msg, ai_msg, ts),
+                    "INSERT INTO turns (session_id, user_id, user_msg, ai_msg, timestamp, tenant_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (wkey[2], user_id, user_msg, ai_msg, ts, tenant_id or "default"),
                 )
                 conn.commit()
         except Exception as e:
@@ -244,6 +287,7 @@ class MemoryManager:
                             documents=[fact],
                             metadatas=[{
                                 "user_id": user_id,
+                                "tenant_id": tenant_id or "default",
                                 "session_id": session_id,
                                 "timestamp": ts,
                             }],
@@ -276,10 +320,10 @@ class MemoryManager:
         working = all_turns[-12:]  # 6 pairs = 12 entries
 
         # Tier 2 — episodic: fetch past session summaries for this user
-        episodic = self._get_episodic_context(user_id)
+        episodic = self._get_episodic_context(user_id, tenant_id)
 
         # Tier 3 — semantic: vector search over past facts
-        semantic = self._get_semantic_context(user_id, query)
+        semantic = self._get_semantic_context(user_id, query, tenant_id)
 
         return {
             "working": working,
@@ -287,7 +331,8 @@ class MemoryManager:
             "semantic": semantic,
         }
 
-    def summarize_session(self, session_id: str, user_id: Optional[str] = None) -> None:
+    def summarize_session(self, session_id: str, user_id: Optional[str] = None,
+                          tenant_id: str = "default") -> None:
         """
         Summarise all turns of a session into a 3–5 sentence paragraph using
         extractive summarisation (no LLM call). Store the summary in SQLite
@@ -297,21 +342,20 @@ class MemoryManager:
 
         Args:
             session_id: The session UUID to summarise.
+            user_id   : Required: a session is only ever summarised for the
+                        (tenant, user) that owns it; without it nothing happens.
         """
+        if not user_id:
+            logger.warning("[MemoryManager] summarize_session called without user_id; ignored")
+            return
+        session_id = self._wkey(tenant_id, user_id, session_id)[2]
         try:
             with sqlite3.connect(self._db_path) as conn:
-                if user_id is not None:
-                    rows = conn.execute(
-                        "SELECT user_id, user_msg, ai_msg, timestamp "
-                        "FROM turns WHERE session_id = ? AND user_id = ? ORDER BY id",
-                        (session_id, user_id),
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        "SELECT user_id, user_msg, ai_msg, timestamp "
-                        "FROM turns WHERE session_id = ? ORDER BY id",
-                        (session_id,),
-                    ).fetchall()
+                rows = conn.execute(
+                    "SELECT user_id, user_msg, ai_msg, timestamp "
+                    "FROM turns WHERE session_id = ? AND user_id = ? AND tenant_id = ? ORDER BY id",
+                    (session_id, user_id, tenant_id),
+                ).fetchall()
 
             if not rows:
                 return
@@ -348,9 +392,9 @@ class MemoryManager:
             with sqlite3.connect(self._db_path) as conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO sessions "
-                    "(session_id, user_id, summary, start_time, end_time, turn_count) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (session_id, user_id, summary, start_time, end_time, turn_count),
+                    "(tenant_id, user_id, session_id, summary, start_time, end_time, turn_count) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (tenant_id, user_id, session_id, summary, start_time, end_time, turn_count),
                 )
                 conn.commit()
 
@@ -358,7 +402,7 @@ class MemoryManager:
         except Exception as e:
             logger.error(f"[MemoryManager] summarize_session error: {e}")
 
-    def get_user_profile(self, user_id: str) -> dict:
+    def get_user_profile(self, user_id: str, tenant_id: str = "default") -> dict:
         """
         Return an aggregated profile for the user inferred from past queries.
 
@@ -373,8 +417,8 @@ class MemoryManager:
         try:
             with sqlite3.connect(self._db_path) as conn:
                 rows = conn.execute(
-                    "SELECT user_msg, ai_msg FROM turns WHERE user_id = ?",
-                    (user_id,),
+                    "SELECT user_msg, ai_msg FROM turns WHERE user_id = ? AND tenant_id = ?",
+                    (user_id, tenant_id),
                 ).fetchall()
         except Exception:
             return {}
@@ -416,6 +460,7 @@ class MemoryManager:
         answer: str,
         evidence_coverage: float = 0.0,
         critique_passed: bool = False,
+        tenant_id: str = "default",
     ) -> None:
         """Persist one DeepResearchAgent result, keyed by research_id so a
         long-running research task's findings can be retrieved later."""
@@ -423,16 +468,16 @@ class MemoryManager:
             with sqlite3.connect(self._db_path) as conn:
                 conn.execute(
                     "INSERT INTO research_findings "
-                    "(research_id, user_id, question, answer, evidence_coverage, critique_passed, timestamp) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(research_id, user_id, question, answer, evidence_coverage, critique_passed, timestamp, tenant_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (research_id, user_id, question, answer, evidence_coverage,
-                     int(critique_passed), datetime.now().isoformat()),
+                     int(critique_passed), datetime.now().isoformat(), tenant_id),
                 )
                 conn.commit()
         except Exception as e:
             logger.error(f"[MemoryManager] save_research_finding failed: {e}")
 
-    def get_research_findings(self, research_id: str, user_id: str) -> List[dict]:
+    def get_research_findings(self, research_id: str, user_id: str, tenant_id: str = "default") -> List[dict]:
         """
         Retrieve findings for one research_id — scoped to user_id so one
         user cannot read another user's research findings by guessing an id.
@@ -441,9 +486,9 @@ class MemoryManager:
             with sqlite3.connect(self._db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
-                    "SELECT * FROM research_findings WHERE research_id = ? AND user_id = ? "
+                    "SELECT * FROM research_findings WHERE research_id = ? AND user_id = ? AND tenant_id = ? "
                     "ORDER BY id ASC",
-                    (research_id, user_id),
+                    (research_id, user_id, tenant_id),
                 ).fetchall()
             return [dict(r) for r in rows]
         except Exception as e:
@@ -452,14 +497,14 @@ class MemoryManager:
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
-    def _get_episodic_context(self, user_id: str) -> str:
+    def _get_episodic_context(self, user_id: str, tenant_id: str = "default") -> str:
         """Fetch the 3 most recent session summaries for this user from SQLite."""
         try:
             with sqlite3.connect(self._db_path) as conn:
                 rows = conn.execute(
-                    "SELECT summary FROM sessions WHERE user_id = ? "
+                    "SELECT summary FROM sessions WHERE user_id = ? AND tenant_id = ? "
                     "ORDER BY end_time DESC LIMIT 3",
-                    (user_id,),
+                    (user_id, tenant_id),
                 ).fetchall()
             if rows:
                 return " | ".join(r[0] for r in rows)
@@ -467,7 +512,7 @@ class MemoryManager:
             logger.debug(f"[MemoryManager] _get_episodic_context: {e}")
         return ""
 
-    def _get_semantic_context(self, user_id: str, query: str) -> List[str]:
+    def _get_semantic_context(self, user_id: str, query: str, tenant_id: str = "default") -> List[str]:
         """Vector-search ChromaDB user_memory for facts relevant to the query."""
         try:
             collection = self._get_chroma_collection()
@@ -476,13 +521,40 @@ class MemoryManager:
             results = collection.query(
                 query_texts=[query],
                 n_results=3,
-                where={"user_id": user_id},
+                where={"$and": [{"user_id": user_id}, {"tenant_id": tenant_id}]},
             )
             docs = results.get("documents", [[]])[0]
             return [d for d in docs if d]
         except Exception as e:
             logger.debug(f"[MemoryManager] _get_semantic_context: {e}")
         return []
+
+
+class _TenantMemory:
+    """MemoryManager bound to one tenant (see MemoryManager.scoped)."""
+
+    def __init__(self, mm: MemoryManager, tenant_id: str) -> None:
+        self._mm, self._tenant = mm, tenant_id
+
+    def save_turn(self, session_id: str, user_id: str, user_msg: str, ai_msg: str) -> None:
+        self._mm.save_turn(session_id, user_id, user_msg, ai_msg, tenant_id=self._tenant)
+
+    def get_context(self, session_id: str, user_id: str, query: str) -> dict:
+        return self._mm.get_context(session_id, user_id, query, tenant_id=self._tenant)
+
+    def summarize_session(self, session_id: str, user_id: str) -> None:
+        self._mm.summarize_session(session_id, user_id, tenant_id=self._tenant)
+
+    def save_research_finding(self, research_id: str, user_id: str, question: str, answer: str,
+                              evidence_coverage: float = 0.0, critique_passed: bool = False) -> None:
+        self._mm.save_research_finding(research_id, user_id, question, answer, evidence_coverage,
+                                       critique_passed, tenant_id=self._tenant)
+
+    def get_research_findings(self, research_id: str, user_id: str) -> List[dict]:
+        return self._mm.get_research_findings(research_id, user_id, tenant_id=self._tenant)
+
+    def get_user_profile(self, user_id: str) -> dict:
+        return self._mm.get_user_profile(user_id, tenant_id=self._tenant)
 
 
 # ── Module-level singleton ──────────────────────────────────────────────────────

@@ -419,7 +419,10 @@ class ResearchRunner:
         if row is None:
             raise JobNotFound(job_id)
         budget = json.loads(row["budget"])
-        allowed = json.loads(row["allowed_doc_ids"]) if row["allowed_doc_ids"] is not None else None
+        allowed = None
+        if row["allowed_doc_ids"] is not None:
+            from VENUAI.authz import ScopedDocIds   # carries tenant_id so retrieval filters on it too
+            allowed = ScopedDocIds(json.loads(row["allowed_doc_ids"]), tenant_id=row["tenant_id"])
         t0 = time.time()
         self.store.update_job(job_id, status="running", phase="researching", boot_id=self.store.boot_id,
                               error=None)

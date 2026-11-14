@@ -121,7 +121,7 @@ def test_document_delete_by_non_owner_is_forbidden(client, isolated_auth_db):
         token = login.json()["access_token"]
 
         r = client.delete(f"/documents/{doc_id}", headers={"Authorization": f"Bearer {token}"})
-        assert r.status_code == 403
+        assert r.status_code == 404
     finally:
         # restore exactly what was there before — never clobber real uploaded-doc metadata
         rag_server.save_metadata(original_meta)

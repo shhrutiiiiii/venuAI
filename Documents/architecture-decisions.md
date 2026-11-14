@@ -207,3 +207,11 @@ Dev keeps convenience ports on localhost; prod publishes only the TLS proxy and 
 ### ADR-S3.6: Request bounds and LLM output sanitising
 **Decision:** `request_limits.py`: question/query 4000 chars, history at most 20 items of `user|assistant` role x 4000 chars (40k total), `top_k` 1..20, `session_id` `^[A-Za-z0-9_-]{1,64}$`, graph text 50k. Violations return a 422 whose body lists field locations only (no echoed input). `output_sanitizer.neutralise_markdown`, called from `GuardrailEngine.validate_output` (so both `/query` and `/query/stream` final text), removes markdown/HTML images and scripts, and turns links to non-allowlisted hosts into `label (host)`. Allowed: relative paths, `#anchors`, `cite:`/`citation:`/`doc:` and hosts in `OUTPUT_LINK_ALLOWLIST` / `OUTPUT_IMAGE_ALLOWLIST`. Prompt-injection detection runs on NFKC-normalised, zero-width-stripped text plus base64/hex-decoded variants.
 **Consequence:** The current UI renders answers as plain text (no markdown renderer), so streamed tokens are not an exfil channel today; if a markdown renderer is added it must apply the same sanitiser to partial text.
+### ADR-S2.1: One authorization module, 404 for everything not visible
+**Decision:** `VENUAI/authz.py` owns tenant/owner/PUBLIC visibility. Not visible (other tenant or non-owner private) and missing are indistinguishable (404, same body); 403 only for visible-but-forbidden actions and role gates. **Consequence:** UI code keyed on 403 for documents/datasets must treat 404 as "no access"; admin-only pages still receive 403.
+
+### ADR-S2.2: Tenant is part of every memory and retrieval key
+**Decision:** memory (working, episodic, semantic, research, long-term) and vector retrieval are keyed/filtered by tenant as well as user; `ScopedDocIds` carries the tenant through existing `allowed_doc_ids` plumbing so no caller signature changed. Legacy `sessions` rows are migrated under tenant `default`; legacy Chroma semantic facts without `tenant_id` are no longer recalled (safe default).
+
+### ADR-S2.3: Deny-by-default tool policy with operator switches
+**Decision:** code execution needs role admin AND `ENABLE_CODE_EXECUTION=1`; per-request tool budget; unscoped legacy tools off unless `ALLOW_UNSCOPED_TOOLS=1`; server-wide MCP pin approval needs `SUPERADMIN_USER_IDS`. **Consequence:** these are new env vars; defaults are the safe ones.

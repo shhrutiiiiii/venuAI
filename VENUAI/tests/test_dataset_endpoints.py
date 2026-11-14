@@ -93,7 +93,7 @@ def test_other_user_cannot_delete_dataset(client, auth_headers):
     headers2 = {"Authorization": f"Bearer {login2.json()['access_token']}"}
 
     r = client.delete(f"/datasets/{dataset_id}", headers=headers2)
-    assert r.status_code in (403, 404)  # other user now has own tenant
+    assert r.status_code == 404
 
 
 def test_owner_can_delete_dataset(client, auth_headers):
@@ -194,4 +194,4 @@ def test_other_user_cannot_analyze_private_dataset(client, auth_headers):
         json={"question": "anything"},
         headers=headers2,
     )
-    assert r.status_code in (403, 404)
+    assert r.status_code == 404

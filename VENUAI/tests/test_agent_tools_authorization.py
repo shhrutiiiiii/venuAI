@@ -105,7 +105,7 @@ def test_document_summary_tool_rejects_unauthorized_doc(monkeypatch):
     assert "a.pdf" in own_doc
 
     other_doc = summary_tool.invoke({"doc_id": "doc-other"})
-    assert "not authorized" in other_doc.lower()
+    assert "not found" in other_doc.lower()  # uniform with missing ids (no existence oracle)
 
 
 def test_memory_recall_tool_does_not_expose_user_id_parameter():
@@ -125,8 +125,9 @@ def test_memory_recall_tool_always_uses_bound_user_id(monkeypatch):
     captured = {}
 
     class _FakeMemoryManager:
-        def get_context(self, session_id, user_id, query):
+        def get_context(self, session_id, user_id, query, tenant_id="default"):
             captured["user_id"] = user_id
+            captured["tenant_id"] = tenant_id
             return {}
 
     import VENUAI.memory_manager as memory_manager

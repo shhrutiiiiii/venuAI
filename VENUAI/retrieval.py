@@ -262,10 +262,17 @@ def _similarity_from_distance(vs, dist: float) -> float:
     return 1.0 - dist / 2.0 if space == "l2" else 1.0 - dist
 
 
-def _dense(vs, query: str, k: int, allowed: Optional[List[str]]) -> List[Tuple[Document, Optional[float]]]:
+def _dense(vs, query: str, k: int, allowed: Optional[List[str]],
+           tenant_id: Optional[str] = None) -> List[Tuple[Document, Optional[float]]]:
     flt = None
     if allowed is not None:
-        flt = {"doc_id": {"$in": allowed or ["__none__"]}}
+        flt = {"doc_id": {"$in": list(allowed) or ["__none__"]}}
+        # Defence in depth (OWASP LLM08): also filter on tenant_id in the vector
+        # store itself. Chunks ingested before tenant metadata existed belong to
+        # the "default" tenant and carry no tenant_id, so for that tenant only
+        # the doc_id filter plus the post-filter below apply.
+        if tenant_id and tenant_id != "default":
+            flt = {"$and": [flt, {"tenant_id": tenant_id}]}
     if hasattr(vs, "similarity_search_with_score"):
         try:
             res = vs.similarity_search_with_score(query, k=k, filter=flt) if flt else \
@@ -326,6 +333,8 @@ def retrieve_documents(
 
     pool = top_k * candidate_multiplier()
     allowed_set = set(allowed_doc_ids) if allowed_doc_ids is not None else None
+    from VENUAI import authz
+    tenant_id = authz.tenant_of(allowed_doc_ids)   # set by rag_server.get_visible_doc_ids
     index = get_bm25_index(vs)
 
     fused: Dict[str, float] = {}
@@ -334,7 +343,9 @@ def retrieve_documents(
     bm25_hit: set = set()
     for q in queries:
         try:
-            for rank, (d, sim) in enumerate(_dense(vs, q, pool, allowed_doc_ids)):
+            for rank, (d, sim) in enumerate(_dense(vs, q, pool, allowed_doc_ids, tenant_id)):
+                if not authz.chunk_in_tenant(d.metadata, tenant_id):
+                    continue
                 k_ = _key(d)
                 docs_by_key.setdefault(k_, d)
                 fused[k_] = fused.get(k_, 0.0) + 1.0 / (RRF_K + rank + 1)
@@ -345,6 +356,8 @@ def retrieve_documents(
         if index is not None:
             for rank, (i, _score) in enumerate(index.search(q, pool, allowed_set)):
                 d = index.document(i)
+                if not authz.chunk_in_tenant(d.metadata, tenant_id):
+                    continue
                 k_ = _key(d)
                 docs_by_key.setdefault(k_, d)
                 fused[k_] = fused.get(k_, 0.0) + 1.0 / (RRF_K + rank + 1)
@@ -364,7 +377,7 @@ def retrieve_documents(
         try:
             from VENUAI.multimodal_retrieval import retrieve_multimodal_documents
             for rd in retrieve_multimodal_documents(retrieval_query, allowed_doc_ids, top_k=3) or []:
-                if _key(rd) not in fused:
+                if _key(rd) not in fused and authz.chunk_in_tenant(rd.metadata, tenant_id):
                     cands.append(rd)
                     ordered.append(_key(rd))
                     docs_by_key[_key(rd)] = rd

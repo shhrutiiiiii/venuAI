@@ -104,3 +104,5 @@ This section supersedes any older statement above that conflicts with it.
 - **Audit:** `security_events` (append-only): login_ok/failed, login_blocked_locked, account_locked, refresh_reuse_detected, reset_requested/used/rejected, oauth_*, register*, role_change, logout(_all).
 - **Tests:** `VENUAI/tests/test_sec_auth_core.py`, `test_oauth.py`, `test_oauth_endpoints.py`.
 
+## Authorization pointers (S2)
+Role and tenant are always read from the user row, never from the token claims or request bodies (a token claiming `role: admin` for a `user` row is treated as `user`). Resource-level rules, uniform 404s, invites, member role changes, the `SUPERADMIN_USER_IDS` operator list and the tool-policy switches are documented in [`multi-tenancy.md`](multi-tenancy.md#authorization-layer-security-stream-s2).

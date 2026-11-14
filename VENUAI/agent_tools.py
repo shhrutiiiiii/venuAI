@@ -169,11 +169,11 @@ def _search_kb(
         return f"Knowledge base search failed: ({type(e).__name__}; details in server log)"
 
 
-def _recall_memory(query: str, user_id: str) -> str:
+def _recall_memory(query: str, user_id: str, tenant_id: str = "default") -> str:
     try:
         from VENUAI.memory_manager import get_memory_manager
         mm = get_memory_manager()
-        ctx = mm.get_context(session_id="recall-temp", user_id=user_id, query=query)
+        ctx = mm.get_context(session_id="recall-temp", user_id=user_id, query=query, tenant_id=tenant_id)
         parts = []
         if ctx.get("episodic"):
             parts.append(f"**Past sessions:** {ctx['episodic']}")
@@ -192,11 +192,9 @@ def _summarize_document(doc_id: str, allowed_doc_ids: Optional[List[str]]) -> st
         if not meta:
             return "No documents found in the knowledge base."
 
-        if doc_id not in meta:
-            return f"Document '{doc_id}' not found. Use list_knowledge_base to see available IDs."
-
-        if allowed_doc_ids is not None and doc_id not in allowed_doc_ids:
-            return "You are not authorized to view this document."
+        # One message for "missing" and "not yours": no existence oracle.
+        if doc_id not in meta or (allowed_doc_ids is not None and doc_id not in allowed_doc_ids):
+            return "Document not found. Use list_knowledge_base to see available IDs."
 
         doc = meta[doc_id]
         tags = doc.get("tags", {})
@@ -242,6 +240,16 @@ def _list_kb(allowed_doc_ids: Optional[List[str]]) -> str:
         return f"Failed to list knowledge base: ({type(e).__name__}; details in server log)"
 
 
+_UNSCOPED_DENIED = (
+    "Tool denied: this unscoped tool has no caller identity (it would read across tenants/users). "
+    "Use build_agent_tools() or set ALLOW_UNSCOPED_TOOLS=1 for single-tenant operator use."
+)
+
+
+def _unscoped_allowed() -> bool:
+    return os.getenv("ALLOW_UNSCOPED_TOOLS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # ── Module-level, unfiltered tools ─────────────────────────────────────────────
 # Kept for VENUAI/mcp_server.py backward compatibility — MCP has no per-request
 # user identity to bind yet (see Documents/Backend/authentication.md). Do not
@@ -259,6 +267,8 @@ def drdo_kb_search(query: str, top_k: int = 5) -> str:
         query : The search query string.
         top_k : Number of results to return (default 5).
     """
+    if not _unscoped_allowed():
+        return _UNSCOPED_DENIED
     return _search_kb(query, top_k, allowed_doc_ids=None)
 
 
@@ -290,6 +300,8 @@ def memory_recall(query: str, user_id: str) -> str:
         query   : The search query to find relevant memories.
         user_id : The user's ID (from AuthUser).
     """
+    if not _unscoped_allowed():
+        return _UNSCOPED_DENIED
     return _recall_memory(query, user_id)
 
 
@@ -303,6 +315,8 @@ def document_summary(doc_id: str) -> str:
     Args:
         doc_id: The document UUID (from the /documents list endpoint).
     """
+    if not _unscoped_allowed():
+        return _UNSCOPED_DENIED
     return _summarize_document(doc_id, allowed_doc_ids=None)
 
 
@@ -326,6 +340,8 @@ def list_knowledge_base() -> str:
     knowledge base, with their filename, page count, upload date,
     and domain tags.
     """
+    if not _unscoped_allowed():
+        return _UNSCOPED_DENIED
     return _list_kb(allowed_doc_ids=None)
 
 
@@ -364,6 +380,14 @@ def _run_with_timeout(fn, timeout_s: float):
         raise TimeoutError(f"tool timed out after {timeout_s:.0f}s")
 
 
+def tool_call_budget() -> int:
+    """Max tool calls one request may make (env TOOL_CALL_BUDGET, default 12)."""
+    try:
+        return max(1, int(os.getenv("TOOL_CALL_BUDGET", "12")))
+    except ValueError:
+        return 12
+
+
 def guarded_call(tool_id: str, args: dict, fn, *, user_id: str, tenant_id: str = "default",
                  user_role: str = "user", agent_id: str = "react_agent", kind: str = "builtin",
                  description: str = "", schema: Optional[dict] = None) -> str:
@@ -382,7 +406,8 @@ def guarded_call(tool_id: str, args: dict, fn, *, user_id: str, tenant_id: str =
         tracing.record_tool_call(tool_id, args, status=status, decision=decision, approver=approver,
                                  latency_ms=latency, error=error, user_id=user_id, tenant_id=tenant_id)
 
-    decision = policy_engine.check_tool_call(user_role=user_role, agent_id=agent_id, tool_id=tool_id)
+    decision = policy_engine.check_tool_call(user_role=user_role, agent_id=agent_id, tool_id=tool_id,
+                                             user_id=user_id, tenant_id=tenant_id)
     if not decision.allowed:
         ledger("denied", "policy_denied", error=decision.reason)
         return f"Tool denied: {decision.reason}"
@@ -483,7 +508,22 @@ def build_agent_tools(
         except Exception:
             pass
 
+    budget = {"left": tool_call_budget()}
+
     def _call(tool_id: str, args: dict, fn) -> str:
+        # Per-request tool-call budget: blunts prompt-injection loops that
+        # keep the agent calling tools. Denials are audited and ledgered.
+        if budget["left"] <= 0:
+            msg = "tool-call budget for this request exhausted"
+            try:
+                from VENUAI import tracing, authz
+                tracing.record_tool_call(tool_id, args, status="denied", decision="budget_exceeded",
+                                         user_id=user_id, tenant_id=tenant_id, error=msg)
+                authz.audit("tool.denied", user_id=user_id, tenant_id=tenant_id, detail=f"{tool_id}: {msg}")
+            except Exception:
+                pass
+            return f"Tool denied: {msg}. Answer with the information already gathered."
+        budget["left"] -= 1
         return guarded_call(tool_id, args, fn, user_id=user_id, tenant_id=tenant_id, user_role=user_role)
 
     @tool
@@ -531,7 +571,7 @@ def build_agent_tools(
         Args:
             query : The search query to find relevant memories.
         """
-        return _call("memory_recall", {"query": query}, lambda: _recall_memory(query, user_id))
+        return _call("memory_recall", {"query": query}, lambda: _recall_memory(query, user_id, tenant_id))
 
     @tool
     def document_summary(doc_id: str) -> str:

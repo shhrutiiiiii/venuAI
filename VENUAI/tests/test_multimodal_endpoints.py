@@ -104,7 +104,7 @@ def test_other_user_cannot_view_private_multimodal_document(client, auth_headers
     token2 = login2.json()["access_token"]
 
     r = client.get(f"/documents/{doc_id}/regions", headers={"Authorization": f"Bearer {token2}"})
-    assert r.status_code in (403, 404)
+    assert r.status_code == 404
 
 
 def test_ask_about_table_region_returns_real_answer(client, auth_headers, monkeypatch):
