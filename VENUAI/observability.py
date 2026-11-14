@@ -91,6 +91,14 @@ def configure_logging() -> None:
     root_logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
 
+def configure_error_reporting() -> bool:
+    """Optional Sentry init - inert (no import) unless SENTRY_DSN is set. See VENUAI/otel_genai.py."""
+    if not os.getenv("SENTRY_DSN", "").strip():
+        return False
+    from VENUAI import otel_genai
+    return otel_genai.init_sentry()
+
+
 def new_request_id() -> str:
     return uuid.uuid4().hex[:16]
 

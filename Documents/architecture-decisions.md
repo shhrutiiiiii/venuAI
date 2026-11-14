@@ -57,6 +57,20 @@ Cross-cutting decisions only — domain-internal choices stay in their domain do
 - **Decision:** `VENUAI/evals` runs only against the real pipeline (in-process TestClient or `--base-url`) and aborts loudly otherwise. Harvest (calls the generator) and score (deterministic metrics + judge) are separate steps over a JSONL file. The judge is `qwen/qwen3.8-27b`, a different model family from the `gpt-oss` generator, at temperature 0 with an on-disk cache. Judge failures are reported, never scored as 0. The eval corpus is synthetic and ingested into a throwaway tenant. RAGAS-style metrics are implemented in-house instead of adding the `ragas` dependency.
 - **Consequences:** eval numbers are trustworthy and comparable across branches; live eval costs Groq tokens, so CI runs it only when `GROQ_API_KEY` exists. Details: [`AI/evaluation.md`](AI/evaluation.md). (ID prefixed `E` to avoid colliding with ADR numbers added in parallel.)
 
+### ADR-B21: Contextvar tracing with a tenant-scoped trace store; OTel strictly opt-in
+**Context:** B1/B2/B4 needed one tracing seam; observability must not cost latency or leak other users' data or content.
+**Decision:** `tracing.py` keeps a contextvar trace (no-op without one) persisted at `finish_trace` to SQLite, tenant/owner scoped, content off by default, TTL 14 days. OTel GenAI spans are built from the finished trace and exported only if `OTEL_EXPORTER_OTLP_ENDPOINT` is set; `opentelemetry` is never imported otherwise.
+**Consequence:** zero default overhead and no new dependency; the pinned OTel convention version may need bumping upstream. See [`AI/observability.md`](AI/observability.md).
+
+### ADR-B22: Guarded tool execution with human approval and MCP tool pinning
+**Context:** MCP and code tools are high-risk; tool descriptions can change under a "rug pull".
+**Decision:** all tool calls pass `guarded_call` (policy, schema validation, breaker, approval, timeout/retry, ledger with hashed args). MCP tools default to approval; tool definitions are pinned by sha256 and disabled on drift until admin re-approval. The fake MCP client results were removed.
+**Consequence:** safer by default; approvals add a round trip for MCP tools (`TOOL_APPROVAL=off` is an explicit opt-out). See [`AI/agent-protocols.md`](AI/agent-protocols.md).
+
+### ADR-B23: MCP 2025-11-25 alignment and opt-in A2A
+**Decision:** the MCP server validates `MCP-Protocol-Version`, publishes protected-resource metadata, accepts VenuAI JWTs with tenant scoping, and restricts `upload_document` to an allowlisted directory. A2A is off unless `A2A_ENABLED=on`, authenticated, rate limited, and routed through the orchestrator.
+**Consequence:** the previous arbitrary-file read through `upload_document` is closed.
+
 ## Workflow
 N/A — this document records decisions, it does not describe a runtime flow.
 

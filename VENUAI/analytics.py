@@ -201,7 +201,10 @@ class QueryAnalytics:
             for r in recent
         ]
 
+        ops = self._ops_block()
         return {
+            "ops": ops,
+            "online_eval": self._online_eval_block(),
             "total_queries": {
                 "today": total_today,
                 "week": total_week,
@@ -215,6 +218,38 @@ class QueryAnalytics:
             "top_topics": top_topics,
             "recent_queries": recent_queries,
         }
+
+    @staticmethod
+    def _ops_block() -> dict:
+        """Ledger-backed ops metrics (tokens, p50/p95, cache hit, escalation, cost). Never raises."""
+        try:
+            from VENUAI import trace_store
+            m = trace_store.ops_metrics(7)
+            cost, priced = 0.0, False
+            try:
+                from VENUAI.ai_gateway import model_registry as _mr
+                for model, u in m["by_model"].items():
+                    spec = getattr(_mr, "get_model", lambda _m: None)(model)
+                    pin = getattr(spec, "price_in_per_mtok", None)
+                    pout = getattr(spec, "price_out_per_mtok", None)
+                    if pin is not None and pout is not None:
+                        priced = True
+                        cost += u["prompt_tokens"] / 1e6 * pin + u["completion_tokens"] / 1e6 * pout
+            except Exception:
+                pass
+            m["cost_usd"] = round(cost, 4) if priced else None   # null = no pricing in registry
+            return m
+        except Exception as e:
+            logger.debug("ops block failed: %s", e)
+            return {}
+
+    @staticmethod
+    def _online_eval_block() -> dict:
+        try:
+            from VENUAI import online_evals
+            return online_evals.status()
+        except Exception:
+            return {}
 
     @staticmethod
     def _extract_top_topics(questions: List[str]) -> List[dict]:
