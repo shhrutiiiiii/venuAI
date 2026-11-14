@@ -15,6 +15,7 @@ either raises NotImplementedError with a clear message. This is the
 integration.
 """
 
+import logging
 import os
 import re
 from abc import ABC, abstractmethod
@@ -25,6 +26,8 @@ from typing import Iterator, List, Optional
 # Every Groq SDK / ChatGroq client in VENUAI/ must be built here so timeout and
 # retry policy live in exactly one place. SDK max_retries is 1: the AIGateway
 # owns retry/backoff/fallback; stacking SDK retries on top multiplies latency.
+
+logger = logging.getLogger("drdo-rag")
 
 DEFAULT_GROQ_TIMEOUT_SECONDS = 30.0
 GROQ_SDK_MAX_RETRIES = 1
@@ -111,6 +114,7 @@ class CompletionResult:
     provider: str
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
+    latency_ms: Optional[float] = None
 
 
 class ModelProvider(ABC):
@@ -138,6 +142,11 @@ class ModelProvider(ABC):
         raise NotImplementedError(f"{self.name} provider does not support streaming.")
 
 
+def _is_schema_rejection(e: Exception) -> bool:
+    msg = str(e).lower()
+    return any(k in msg for k in ("response_format", "json_schema", "structured output", "json mode"))
+
+
 class GroqProvider(ModelProvider):
     name = "groq"
 
@@ -148,6 +157,7 @@ class GroqProvider(ModelProvider):
                 (timeout + max_retries=1 applied there).
         """
         self._client = groq_client
+        self._no_schema: set = set()
 
     def complete(
         self,
@@ -156,13 +166,26 @@ class GroqProvider(ModelProvider):
         max_tokens: int,
         temperature: float,
         reasoning_effort: Optional[str] = None,
+        response_format: Optional[dict] = None,
     ) -> CompletionResult:
-        resp = self._client.chat.completions.create(
-            model=model_id,
-            messages=messages,
-            temperature=temperature,
-            **build_chat_kwargs(model_id, max_tokens, reasoning_effort),
-        )
+        kw = build_chat_kwargs(model_id, max_tokens, reasoning_effort)
+        if response_format and model_id not in self._no_schema:
+            try:
+                resp = self._client.chat.completions.create(
+                    model=model_id, messages=messages, temperature=temperature,
+                    response_format=response_format, **kw)
+            except Exception as e:  # noqa: BLE001
+                if not _is_schema_rejection(e):
+                    raise
+                # Model/endpoint does not support structured output: remember, retry plain
+                # (structured.py repair-parses the text). Not a model failure -> no breaker hit.
+                logger.warning(f"[GroqProvider] response_format unsupported by {model_id}; retrying plain")
+                self._no_schema.add(model_id)
+                resp = self._client.chat.completions.create(
+                    model=model_id, messages=messages, temperature=temperature, **kw)
+        else:
+            resp = self._client.chat.completions.create(
+                model=model_id, messages=messages, temperature=temperature, **kw)
         usage = getattr(resp, "usage", None)
         return CompletionResult(
             content=strip_reasoning(resp.choices[0].message.content),
@@ -179,8 +202,11 @@ class GroqProvider(ModelProvider):
         max_tokens: int,
         temperature: float,
         reasoning_effort: Optional[str] = None,
+        usage_sink: Optional[dict] = None,
     ) -> Iterator[str]:
-        """Yields content deltas only (reasoning is excluded by request params)."""
+        """Yields content deltas only (reasoning is excluded by request params).
+        usage_sink, when given, receives prompt/completion tokens if Groq reports them
+        on the final chunk (x_groq.usage / usage); otherwise it stays empty (unknown)."""
         resp = self._client.chat.completions.create(
             model=model_id,
             messages=messages,
@@ -190,6 +216,11 @@ class GroqProvider(ModelProvider):
         )
         in_think = False
         for chunk in resp:
+            if usage_sink is not None:
+                u = getattr(chunk, "usage", None) or getattr(getattr(chunk, "x_groq", None), "usage", None)
+                if u is not None and getattr(u, "prompt_tokens", None) is not None:
+                    usage_sink["prompt_tokens"] = getattr(u, "prompt_tokens", None)
+                    usage_sink["completion_tokens"] = getattr(u, "completion_tokens", None)
             if not getattr(chunk, "choices", None):
                 continue
             delta = chunk.choices[0].delta.content or ""
