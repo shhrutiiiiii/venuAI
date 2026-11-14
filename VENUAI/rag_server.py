@@ -1868,6 +1868,8 @@ async def query_stream(
                 max_tokens=1500, temperature=0.2,
                 prefer_model=hint.get("prefer_model"), reasoning_effort=hint.get("effort"))
             ctx.note_model(gw_stream.model_used)
+            if ctx.meter is not None and ctx.meter.ttft_ms is None:
+                ctx.meter.ttft_ms = gw_stream.ttft_ms   # measured by the gateway at first token
             events.put({"model": gw_stream.model_used})
             full = ""
             for delta in gw_stream:
