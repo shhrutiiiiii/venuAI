@@ -33,7 +33,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from VENUAI import auth
+from VENUAI import auth, authz
 from VENUAI.ai_gateway.provider import get_groq_client, get_chat_groq
 from VENUAI.auth import AuthenticatedUser, get_current_user, require_admin
 from VENUAI.upload_security import generate_storage_name, validate_upload
@@ -130,7 +130,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 import importlib as _importlib
 
 for _mod in ("research_api", "voice_api", "memory_api", "trace_api",
-             "a2a_api", "approvals_api", "export_api"):
+             "a2a_api", "approvals_api", "export_api", "tenant_admin"):
     _full = f"VENUAI.{_mod}"
     try:
         app.include_router(_importlib.import_module(_full).router)
@@ -286,7 +286,7 @@ class QueryRequest(BaseModel):
     top_k: int = 4
     history: Optional[List[dict]] = None
     # New fields — all have defaults for backward compatibility
-    session_id: str = "default-session"
+    session_id: str = ""            # empty -> server-issued id (authz.normalize_session_id)
     user_id: Optional[str] = None
     agent_mode: bool = False        # ReAct agentic loop
     multi_agent_mode: bool = False  # specialist multi-agent routing
@@ -620,7 +620,7 @@ def tenant_usage(current_user: AuthenticatedUser = Depends(get_current_user)):
 
 @app.patch("/tenants", response_model=auth.TenantOut)
 def update_tenant_settings(
-    body: auth.UpdateTenantRequest, current_user: AuthenticatedUser = Depends(require_admin),
+    body: auth.UpdateTenantRequest, current_user: AuthenticatedUser = Depends(authz.require_tenant_admin),
 ):
     """Rename the tenant and/or adjust its quotas — admin-only, scoped to
     the caller's own tenant (there is no endpoint that can target a
@@ -635,7 +635,7 @@ def update_tenant_settings(
 
 
 @app.get("/tenants/members", response_model=List[auth.UserOut])
-def list_tenant_members(current_user: AuthenticatedUser = Depends(require_admin)):
+def list_tenant_members(current_user: AuthenticatedUser = Depends(authz.require_tenant_admin)):
     """List every member of the caller's own tenant — admin-only."""
     return auth.list_tenant_members(current_user.tenant_id)
 
@@ -644,7 +644,7 @@ def list_tenant_members(current_user: AuthenticatedUser = Depends(require_admin)
 @limiter.limit("10/minute")
 def add_tenant_member(
     request: Request, body: auth.AddTenantMemberRequest,
-    current_user: AuthenticatedUser = Depends(require_admin),
+    current_user: AuthenticatedUser = Depends(authz.require_tenant_admin),
 ):
     """
     Add a new member directly to the admin's own tenant — this is a real,
@@ -672,12 +672,20 @@ def _llm_health() -> dict:
 
 @app.get("/health")
 def health_check():
-    meta = load_metadata()
+    """Public liveness probe (docker/k8s healthchecks, UI online badge).
+    Deliberately reveals nothing about the deployment - see /health/details."""
+    return {"status": "ok"}
+
+
+@app.get("/health/details")
+def health_details(current_user: AuthenticatedUser = Depends(authz.require_tenant_admin)):
+    """Deployment details (model names, counts) - authenticated admins only.
+    The document count is the admin's own tenant, never global."""
     return {
         "status": "ok",
         "service": "DRDO VenuAI RAG Server",
         "version": "1.1.0",
-        "documents_ingested": len(meta),
+        "documents_ingested": _count_tenant_documents(current_user.tenant_id),
         "vector_store": "ChromaDB (local)",
         "embedding_model": get_embedding_model_name(),
         "llm": _llm_health(),
@@ -911,16 +919,10 @@ def get_visible_doc_ids(current_user: AuthenticatedUser) -> Optional[List[str]]:
     belonging to the "default" tenant for backward compatibility.
     """
     meta = load_metadata()
-    tenant_docs = {
-        doc_id: info for doc_id, info in meta.items()
-        if info.get("tenant_id", "default") == current_user.tenant_id
-    }
-    if current_user.role == "admin":
-        return list(tenant_docs.keys())
-    return [
-        doc_id for doc_id, info in tenant_docs.items()
-        if info.get("owner_id") == current_user.id or info.get("classification") == "PUBLIC"
-    ]
+    return authz.ScopedDocIds(
+        (doc_id for doc_id, info in meta.items() if authz.can_see(info, current_user)),
+        tenant_id=current_user.tenant_id,
+    )
 
 
 def retrieve_node(state: RAGGraphState) -> dict:
@@ -1225,7 +1227,8 @@ def query_knowledge_base(
 
     # Fetch memory context
     from VENUAI.memory_manager import get_memory_manager
-    mm = get_memory_manager()
+    req.session_id = authz.normalize_session_id(req.session_id)
+    mm = get_memory_manager().scoped(current_user.tenant_id)
     mem_ctx = mm.get_context(req.session_id, req.user_id or "anonymous", req.question)
     working_memory   = mem_ctx.get("working", [])
     semantic_memories = mem_ctx.get("semantic", [])
@@ -1581,7 +1584,8 @@ async def query_stream(
 
     async def event_generator():
         try:
-            mm = get_memory_manager()
+            req.session_id = authz.normalize_session_id(req.session_id)
+            mm = get_memory_manager().scoped(current_user.tenant_id)
             mem_ctx = mm.get_context(req.session_id, req.user_id or "anonymous", req.question)
             effective_history = req.history or mem_ctx.get("working", [])
 
@@ -1786,7 +1790,7 @@ def run_deep_research(
     if research_safe["blocked"] or research_safe["answer"] != result.synthesized_answer:
         result = dataclasses.replace(result, synthesized_answer=research_safe["answer"])
 
-    mm = get_memory_manager()
+    mm = get_memory_manager().scoped(current_user.tenant_id)
     mm.save_research_finding(
         research_id=research_id, user_id=current_user.id,
         question=req.question, answer=result.synthesized_answer,
@@ -1865,15 +1869,7 @@ def list_documents(current_user: AuthenticatedUser = Depends(get_current_user)):
     admins see everything; a regular user sees their own uploads plus any
     document explicitly classified PUBLIC. See Documents/Backend/authentication.md.
     """
-    meta = load_metadata()
-    visible = []
-    for v in meta.values():
-        if v.get("tenant_id", "default") != current_user.tenant_id:
-            continue
-        owner_id = v.get("owner_id")
-        classification = v.get("classification", "UNKNOWN")
-        if current_user.role == "admin" or owner_id == current_user.id or classification == "PUBLIC":
-            visible.append(v)
+    visible = authz.filter_visible(load_metadata().values(), current_user)
     return [
         DocumentInfo(
             id=v["id"],
@@ -1892,15 +1888,10 @@ def list_documents(current_user: AuthenticatedUser = Depends(get_current_user)):
 def delete_document(doc_id: str, current_user: AuthenticatedUser = Depends(get_current_user)):
     """Remove a document and all its chunks. Only the owner or an admin may delete it."""
     meta = load_metadata()
-    if doc_id not in meta:
-        raise HTTPException(status_code=404, detail="Document not found.")
-    doc_info = meta[doc_id]
-    if doc_info.get("tenant_id", "default") != current_user.tenant_id:
-        raise HTTPException(status_code=404, detail="Document not found.")
-    if current_user.role != "admin" and doc_info.get("owner_id") != current_user.id:
-        raise HTTPException(status_code=403, detail="You do not have permission to delete this document.")
+    doc_info = authz.check_doc_access(meta, doc_id, current_user, action="delete")
     vs = get_vector_store()
-    vs._collection.delete(where={"doc_id": doc_id})
+    vs._collection.delete(where={"$and": [{"doc_id": doc_id}, {"tenant_id": current_user.tenant_id}]}
+                          if current_user.tenant_id != authz.DEFAULT_TENANT else {"doc_id": doc_id})
     from VENUAI.retrieval import bump_corpus_version
     bump_corpus_version()
     vs.persist()
@@ -1926,12 +1917,10 @@ MAX_MULTIMODAL_PAGES = 50  # bounds processing time/memory for one request —
 
 
 def _check_document_access(doc_info: dict, current_user: AuthenticatedUser) -> None:
-    if doc_info.get("tenant_id", "default") != current_user.tenant_id:
-        raise HTTPException(status_code=404, detail="Document not found.")
-    owner_id = doc_info.get("owner_id")
-    classification = doc_info.get("classification", "UNKNOWN")
-    if current_user.role != "admin" and owner_id != current_user.id and classification != "PUBLIC":
-        raise HTTPException(status_code=403, detail="You do not have permission to view this document.")
+    """Kept for callers/tests; the rule itself lives in VENUAI.authz (404 for
+    anything the caller cannot see - no 403 existence oracle)."""
+    if not authz.can_see(doc_info, current_user):
+        raise authz.not_found("Document")
 
 
 @app.post("/upload/multimodal")
@@ -2003,10 +1992,10 @@ async def upload_multimodal_document(
 def get_document_regions(doc_id: str, current_user: AuthenticatedUser = Depends(get_current_user)):
     """Return the stored region summary for a multimodal-ingested document."""
     meta = load_metadata()
-    if doc_id not in meta or not meta[doc_id].get("is_multimodal"):
-        raise HTTPException(status_code=404, detail="No multimodal data found for this document.")
-    _check_document_access(meta[doc_id], current_user)
-    return meta[doc_id]["multimodal_summary"]
+    info = authz.check_doc_access(meta, doc_id, current_user)
+    if not info.get("is_multimodal"):
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return info["multimodal_summary"]
 
 
 class RegionQuestionRequest(BaseModel):
@@ -2038,17 +2027,17 @@ def ask_about_region(
     from VENUAI.multimodal_document import BoundingBox, DocumentRegion, RegionType
 
     meta = load_metadata()
-    if doc_id not in meta or not meta[doc_id].get("is_multimodal"):
-        raise HTTPException(status_code=404, detail="No multimodal data found for this document.")
-    _check_document_access(meta[doc_id], current_user)
+    info = authz.check_doc_access(meta, doc_id, current_user)
+    if not info.get("is_multimodal"):
+        raise HTTPException(status_code=404, detail="Document not found.")
 
     region_dict = next(
-        (r for page in meta[doc_id]["multimodal_summary"]["pages"] for r in page["regions"]
+        (r for page in info["multimodal_summary"]["pages"] for r in page["regions"]
          if r["region_id"] == region_id),
         None,
     )
     if region_dict is None:
-        raise HTTPException(status_code=404, detail="Region not found.")
+        raise HTTPException(status_code=404, detail="Document not found.")
 
     bbox = region_dict.get("bounding_box")
     region = DocumentRegion(
@@ -2147,12 +2136,8 @@ class DatasetAnalyzeResponse(BaseModel):
 
 
 def _check_dataset_access(dataset_info: dict, current_user: AuthenticatedUser) -> None:
-    if dataset_info.get("tenant_id", "default") != current_user.tenant_id:
-        raise HTTPException(status_code=404, detail="Dataset not found.")
-    owner_id = dataset_info.get("owner_id")
-    classification = dataset_info.get("classification", "UNKNOWN")
-    if current_user.role != "admin" and owner_id != current_user.id and classification != "PUBLIC":
-        raise HTTPException(status_code=403, detail="You do not have permission to access this dataset.")
+    if not authz.can_see(dataset_info, current_user):
+        raise authz.not_found("Dataset")
 
 
 @app.post("/datasets/upload", response_model=DatasetInfo)
@@ -2207,13 +2192,7 @@ async def upload_dataset(
 def list_datasets(current_user: AuthenticatedUser = Depends(get_current_user)):
     """List datasets the caller can see — same ownership/PUBLIC rule as
     GET /documents."""
-    meta = load_dataset_metadata()
-    visible = [
-        v for v in meta.values()
-        if v.get("tenant_id", "default") == current_user.tenant_id
-        and (current_user.role == "admin" or v.get("owner_id") == current_user.id
-             or v.get("classification") == "PUBLIC")
-    ]
+    visible = authz.filter_visible(load_dataset_metadata().values(), current_user)
     return [
         DatasetInfo(
             id=v["id"], filename=v["filename"], columns=v["columns"], dtypes=v["dtypes"],
@@ -2228,10 +2207,7 @@ def list_datasets(current_user: AuthenticatedUser = Depends(get_current_user)):
 def delete_dataset(dataset_id: str, current_user: AuthenticatedUser = Depends(get_current_user)):
     """Remove a dataset — owner or admin only."""
     meta = load_dataset_metadata()
-    if dataset_id not in meta:
-        raise HTTPException(status_code=404, detail="Dataset not found.")
-    dataset_info = meta[dataset_id]
-    _check_dataset_access(dataset_info, current_user)
+    dataset_info = authz.check_dataset_access(meta, dataset_id, current_user, action="delete")
 
     file_path = Path(dataset_info.get("file_path", ""))
     if file_path.exists():
@@ -2264,10 +2240,7 @@ def analyze_dataset(
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
     meta = load_dataset_metadata()
-    if dataset_id not in meta:
-        raise HTTPException(status_code=404, detail="Dataset not found.")
-    dataset_info = meta[dataset_id]
-    _check_dataset_access(dataset_info, current_user)
+    dataset_info = authz.check_dataset_access(meta, dataset_id, current_user)
 
     ge = get_guardrail_engine()
     g_res = ge.validate_input(req.question, user_id=current_user.id)
@@ -2491,7 +2464,7 @@ def search_graph_entities(
 
 
 @app.get("/kb/preset")
-def get_preset_kb():
+def get_preset_kb(current_user: AuthenticatedUser = Depends(get_current_user)):
     """Return preloaded DRDO Master Knowledge Base JSON data."""
     kb_data = load_prefilled_kb()
     if not kb_data:
@@ -2500,10 +2473,13 @@ def get_preset_kb():
 
 
 @app.get("/analytics/dashboard")
-def analytics_dashboard(current_user: AuthenticatedUser = Depends(require_admin)):
-    """Return aggregated analytics data for the admin dashboard (admin-only)."""
+def analytics_dashboard(current_user: AuthenticatedUser = Depends(authz.require_tenant_admin)):
+    """Aggregated analytics for the admin dashboard (admin-only), computed
+    over the admin's own tenant's users only."""
     from VENUAI.analytics import get_analytics
-    return get_analytics().get_dashboard_data()
+    return get_analytics().get_dashboard_data(
+        user_ids=auth.get_user_ids_in_tenant(current_user.tenant_id), tenant_id=current_user.tenant_id,
+    )
 
 
 # ── Phase 4 — read-only registry/security UI endpoints ──────────────────────
@@ -2581,7 +2557,7 @@ class SecurityViolationOut(BaseModel):
 
 @app.get("/security/violations", response_model=List[SecurityViolationOut])
 def list_security_violations(
-    limit: int = 100, current_user: AuthenticatedUser = Depends(require_admin),
+    limit: int = 100, current_user: AuthenticatedUser = Depends(authz.require_tenant_admin),
 ):
     """
     Recent guardrail violations (prompt injection, PII, sensitivity),
@@ -2594,6 +2570,7 @@ def list_security_violations(
     from VENUAI.guardrails import get_guardrail_engine
 
     tenant_user_ids = auth.get_user_ids_in_tenant(current_user.tenant_id)
+    limit = max(1, min(int(limit), 500))
     rows = get_guardrail_engine().get_recent_violations(user_ids=tenant_user_ids, limit=limit)
     return [SecurityViolationOut(**r) for r in rows]
 
@@ -2649,6 +2626,7 @@ def list_evidence_records(limit: int = 50, current_user: AuthenticatedUser = Dep
     """
     from VENUAI import evidence_store
     user_filter = None if current_user.role == "admin" else current_user.id
+    limit = max(1, min(int(limit), 200))
     records = evidence_store.list_records(current_user.tenant_id, user_filter, limit=limit)
     return [EvidenceRecordSummary(**r) for r in records]
 

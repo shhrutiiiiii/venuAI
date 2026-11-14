@@ -88,3 +88,6 @@ bcrypt hashing is deliberately slow (by design, to resist brute force) — this 
 
 ## Notes for Developers
 `mockAuth.ts` has been deleted — do not re-add client-side mock credential checks. Real auth logic lives entirely in `VENUAI/auth.py`; the frontend (`src/lib/authClient.ts`) only calls it. The "Sign in with Google/GitHub" buttons on the login page are pre-existing UI that call the same demo-credential autofill as the "DRDO Scientist"/"Lab Director" buttons — they are not real OAuth and should not be presented as such until item 2 above is done.
+
+## Authorization pointers (S2)
+Role and tenant are always read from the user row, never from the token claims or request bodies (a token claiming `role: admin` for a `user` row is treated as `user`). Resource-level rules, uniform 404s, invites, member role changes, the `SUPERADMIN_USER_IDS` operator list and the tool-policy switches are documented in [`multi-tenancy.md`](multi-tenancy.md#authorization-layer-security-stream-s2).

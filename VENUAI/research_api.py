@@ -60,10 +60,12 @@ def _scope_docs(user: AuthenticatedUser, requested: Optional[List[str]]) -> Opti
     visible = _visible_doc_ids(user)
     if requested is None:
         return visible
+    from VENUAI import authz
+    tenant = authz.tenant_of(visible) or user.tenant_id
     if visible is None:
-        return list(requested)
+        return authz.ScopedDocIds(requested, tenant_id=tenant)
     allowed = set(visible)
-    return [d for d in requested if d in allowed]
+    return authz.ScopedDocIds((d for d in requested if d in allowed), tenant_id=tenant)
 
 
 def _guard(text: str, user: AuthenticatedUser) -> None:

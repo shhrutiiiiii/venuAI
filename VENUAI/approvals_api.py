@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from VENUAI import approvals, auth
+from VENUAI import approvals, auth, authz
 
 router = APIRouter()
 
@@ -34,13 +34,15 @@ def decision(approval_id: str, body: DecisionBody,
 
 
 @router.get("/approvals/pins")
-def pins(user: auth.AuthenticatedUser = Depends(auth.require_admin)):
-    """Admin: MCP tool pins (status 'drifted' = disabled until re-approved)."""
+def pins(user: auth.AuthenticatedUser = Depends(authz.require_super_admin)):
+    """Operator (SUPERADMIN_USER_IDS): MCP tool pins are server-wide, not per tenant,
+    so a tenant admin must not see or re-approve them (status 'drifted' = disabled
+    until re-approved)."""
     return approvals.list_pins()
 
 
 @router.post("/approvals/pins/approve")
-def approve_pin(body: PinApproveBody, user: auth.AuthenticatedUser = Depends(auth.require_admin)):
+def approve_pin(body: PinApproveBody, user: auth.AuthenticatedUser = Depends(authz.require_super_admin)):
     if not approvals.approve_pin(body.server, body.tool, user.id):
         raise HTTPException(status_code=404, detail="No drifted pin for that tool.")
     return {"server": body.server, "tool": body.tool, "status": "pinned"}

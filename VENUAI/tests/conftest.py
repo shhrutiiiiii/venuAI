@@ -28,6 +28,13 @@ os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
 # Model-based safety classifiers make network calls; tests opt in explicitly with mocks.
 os.environ.setdefault("PROMPT_GUARD_ENABLED", "false")
 os.environ.setdefault("SAFEGUARD_ENABLED", "false")
+# Code execution is off by default in production (policy_engine.code_execution_enabled);
+# the policy/sandbox tests exercise the admin path, test_sec_idor.py covers the default-off gate.
+os.environ.setdefault("ENABLE_CODE_EXECUTION", "1")
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "security: security regression tests (authz / IDOR / tenancy)")
 
 
 @pytest.fixture(autouse=True)

@@ -125,8 +125,9 @@ def test_memory_recall_tool_always_uses_bound_user_id(monkeypatch):
     captured = {}
 
     class _FakeMemoryManager:
-        def get_context(self, session_id, user_id, query):
+        def get_context(self, session_id, user_id, query, tenant_id="default"):
             captured["user_id"] = user_id
+            captured["tenant_id"] = tenant_id
             return {}
 
     import VENUAI.memory_manager as memory_manager

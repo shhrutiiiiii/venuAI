@@ -18,6 +18,7 @@ Documents/Backend/authentication.md and spec section 16.
 """
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from VENUAI import tool_registry
 from VENUAI.agents import registry as agent_registry
 
 logger = logging.getLogger("drdo-rag")
+_ctx = threading.local()   # identity of the call being checked, for the audit trail only
 
 
 # Simple, real role → permission mapping. Extend this, not a parallel
@@ -47,7 +49,19 @@ class PolicyDecision:
     reason: str
 
 
-def check_tool_call(user_role: str, agent_id: str, tool_id: str) -> PolicyDecision:
+def code_execution_enabled() -> bool:
+    """EXECUTE_CODE is off unless the operator opts in (ENABLE_CODE_EXECUTION=1)."""
+    return os.getenv("ENABLE_CODE_EXECUTION", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def check_tool_call(user_role: str, agent_id: str, tool_id: str,
+                    user_id: Optional[str] = None, tenant_id: Optional[str] = None) -> PolicyDecision:
+    """Deny by default. `user_role` MUST come from the verified user record
+    (never from model output or request bodies); unknown roles grant nothing."""
+    _ctx.user_id, _ctx.tenant_id = user_id, tenant_id
+    if not isinstance(tool_id, str) or not isinstance(agent_id, str):
+        _audit(user_role, str(agent_id), str(tool_id), False, "malformed tool call")
+        return PolicyDecision(False, "Malformed tool call - deny by default.")
     tool = tool_registry.get(tool_id)
     if tool is None:
         _audit(user_role, agent_id, tool_id, False, "unknown tool")
@@ -62,13 +76,18 @@ def check_tool_call(user_role: str, agent_id: str, tool_id: str) -> PolicyDecisi
         _audit(user_role, agent_id, tool_id, False, "agent not allowed to use this tool")
         return PolicyDecision(False, f"Agent '{agent_id}' is not permitted to use tool '{tool_id}'.")
 
-    granted = ROLE_PERMISSIONS.get(user_role, set())
+    granted = ROLE_PERMISSIONS.get(user_role, set()) if isinstance(user_role, str) else set()
     if tool.required_permission not in granted:
         _audit(user_role, agent_id, tool_id, False, "role lacks required permission")
         return PolicyDecision(
             False,
             f"Role '{user_role}' lacks permission '{tool.required_permission}' required by tool '{tool_id}'.",
         )
+
+    if tool.required_permission == "EXECUTE_CODE" and not code_execution_enabled():
+        _audit(user_role, agent_id, tool_id, False, "code execution disabled by operator")
+        return PolicyDecision(
+            False, "Code execution is disabled on this deployment (operator must set ENABLE_CODE_EXECUTION=1).")
 
     _audit(user_role, agent_id, tool_id, True, "allowed")
     return PolicyDecision(True, "allowed")
@@ -80,6 +99,14 @@ def _audit(user_role: str, agent_id: str, tool_id: str, allowed: bool, reason: s
     # reasonable next step once this policy surface grows beyond tool calls,
     # tracked in Documents/future-additions.md rather than built speculatively now.
     level = logging.INFO if allowed else logging.WARNING
+    if not allowed:
+        try:
+            from VENUAI import authz
+            authz.audit("tool.denied", user_id=getattr(_ctx, "user_id", None),
+                        tenant_id=getattr(_ctx, "tenant_id", None),
+                        detail=f"role={user_role} agent={agent_id} tool={tool_id}: {reason}")
+        except Exception:
+            pass
     logger.log(
         level,
         f"[PolicyEngine] role={user_role} agent={agent_id} tool={tool_id} "

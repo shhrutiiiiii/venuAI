@@ -132,3 +132,12 @@ If you make a decision that a future reader would otherwise have to reverse-engi
 
 ### ADR-B17: Eval additions are dry-run first
 **Decision:** `semantic_cache_sweep`, `calibration`, `reasoning_experiment`, `chunk_size_sweep` added; `harvest --resume`; judge key isolation (`EVAL_JUDGE_API_KEY`); five poisoned-document cases with exact canaries. Anything that spends Groq tokens needs `--live`. **Finding:** with MiniLM, near-miss pairs (AURORA-XB vs AURORA-X, Agni-V vs Agni-IV) reach cosine >= 0.93 in 2 of 4 cases while only 1 of 4 paraphrases does, so a 0.93 semantic cache tier can serve wrong answers; keep it off or raise the threshold (>= 0.98 on this sample) and rely on the exact-hash tier.
+
+### ADR-S2.1: One authorization module, 404 for everything not visible
+**Decision:** `VENUAI/authz.py` owns tenant/owner/PUBLIC visibility. Not visible (other tenant or non-owner private) and missing are indistinguishable (404, same body); 403 only for visible-but-forbidden actions and role gates. **Consequence:** UI code keyed on 403 for documents/datasets must treat 404 as "no access"; admin-only pages still receive 403.
+
+### ADR-S2.2: Tenant is part of every memory and retrieval key
+**Decision:** memory (working, episodic, semantic, research, long-term) and vector retrieval are keyed/filtered by tenant as well as user; `ScopedDocIds` carries the tenant through existing `allowed_doc_ids` plumbing so no caller signature changed. Legacy `sessions` rows are migrated under tenant `default`; legacy Chroma semantic facts without `tenant_id` are no longer recalled (safe default).
+
+### ADR-S2.3: Deny-by-default tool policy with operator switches
+**Decision:** code execution needs role admin AND `ENABLE_CODE_EXECUTION=1`; per-request tool budget; unscoped legacy tools off unless `ALLOW_UNSCOPED_TOOLS=1`; server-wide MCP pin approval needs `SUPERADMIN_USER_IDS`. **Consequence:** these are new env vars; defaults are the safe ones.
