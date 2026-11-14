@@ -81,16 +81,18 @@ def llm_grade(question: str, docs) -> Optional[dict]:
 # ── verification-driven correction ─────────────────────────────────────────────
 
 def needs_correction(state: dict) -> bool:
-    """Measured claim-level evidence says the answer is poorly supported."""
+    """Measured evidence says the answer is poorly supported. The deterministic token-overlap
+    critic alone is too noisy on short answers, so it must be corroborated by the NLI
+    hallucination score; a contradicted claim is sufficient on its own."""
     if state.get("blocked") or state.get("answer_basis") not in (None, "uploaded_documents"):
         return False
     if state.get("insufficient_context"):
         return False
-    if state.get("critique_passed") is False and \
-            ((state.get("unsupported_claim_count") or 0) + (state.get("contradicted_claim_count") or 0)) > 0:
+    if (state.get("contradicted_claim_count") or 0) > 0:
         return True
     h = state.get("hallucination_score")
-    return h is not None and h >= 0.5
+    return (state.get("critique_passed") is False and (state.get("unsupported_claim_count") or 0) > 0
+            and h is not None and h >= 0.5)
 
 
 def unsupported_claims(state: dict) -> List[str]:

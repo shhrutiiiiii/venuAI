@@ -4,7 +4,7 @@ to the big model at high reasoning effort when the verifier is unhappy.
 
   MODEL_CASCADE=on|off (default on)     MAX_ESCALATIONS (default 1)
   CASCADE_LLM_ROUTER=on|off (default off) - ask the fast model only when rules are ambiguous
-  ESCALATE_GROUNDING_BELOW (default 0.25) - grounding below this (when measured) escalates
+  ESCALATE_GROUNDING_BELOW (default 0.1) - grounding below this (when measured) escalates
 
 Complexity is decided by rules first (length, synthesis / multi-hop cues, lookup cues);
 ambiguous questions are treated as complex unless CASCADE_LLM_ROUTER=on. No fabricated
@@ -40,9 +40,9 @@ def max_escalations() -> int:
 
 def escalate_grounding_below() -> float:
     try:
-        return float(os.getenv("ESCALATE_GROUNDING_BELOW", "0.25"))
+        return float(os.getenv("ESCALATE_GROUNDING_BELOW", "0.1"))
     except ValueError:
-        return 0.25
+        return 0.1
 
 
 def classify_complexity(question: str) -> str:
@@ -100,15 +100,16 @@ def escalation_plan() -> CascadePlan:
 
 
 def verifier_unhappy(ver: dict) -> bool:
-    """True when measured verifier output says the answer is poorly supported."""
+    """True when measured verifier output says the answer is poorly supported: a contradicted
+    claim, critic + NLI agreeing, or a (token-overlap) grounding score near zero."""
     g = ver.get("grounding_score")
     if g is not None and g < escalate_grounding_below():
         return True
-    if ver.get("critique_passed") is False and (ver.get("unsupported_claim_count") or 0) + \
-            (ver.get("contradicted_claim_count") or 0) > 0:
+    if (ver.get("contradicted_claim_count") or 0) > 0:
         return True
     h = ver.get("hallucination_score")
-    return h is not None and h >= 0.5
+    return (ver.get("critique_passed") is False and (ver.get("unsupported_claim_count") or 0) > 0
+            and h is not None and h >= 0.5)
 
 
 def should_escalate(plan: CascadePlan, ver: dict, escalations_used: int, downshift: bool = False) -> bool:

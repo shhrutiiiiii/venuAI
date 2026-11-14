@@ -47,7 +47,7 @@ def test_escalation_only_below_threshold_and_capped(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "k")
     plan = model_cascade.CascadePlan(model_cascade.SIMPLE, "openai/gpt-oss-20b", "low")
     good = {"grounding_score": 0.6, "critique_passed": True, "hallucination_score": 0.0}
-    bad = {"grounding_score": 0.1, "critique_passed": True, "hallucination_score": 0.0}
+    bad = {"grounding_score": 0.05, "critique_passed": True, "hallucination_score": 0.0}
     assert not model_cascade.should_escalate(plan, good, 0)
     assert model_cascade.should_escalate(plan, bad, 0)
     assert not model_cascade.should_escalate(plan, bad, model_cascade.max_escalations())   # cap
@@ -56,8 +56,8 @@ def test_escalation_only_below_threshold_and_capped(monkeypatch):
 
 # ── corrective loop ──────────────────────────────────────────────────────────
 def _bad(answer="a"):
-    return {"answer": answer, "critique_passed": False, "unsupported_claim_count": 2,
-            "contradicted_claim_count": 0, "hallucination_score": 0.6, "answer_basis": "uploaded_documents",
+    return {"answer": answer, "critique_passed": False, "contradicted_claim_count": 0, "unsupported_claim_count": 2,
+            "hallucination_score": 0.6, "answer_basis": "uploaded_documents",
             "evidence_coverage": 0.3, "evidence_claims": [{"text": "bad claim", "support_status": "unsupported"}]}
 
 
