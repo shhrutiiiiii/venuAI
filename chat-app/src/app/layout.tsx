@@ -37,7 +37,7 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="antialiased transition-colors duration-300" suppressHydrationWarning>
+      <body className="antialiased" suppressHydrationWarning>
         <ThemeProvider>
           {/* App-wide animated background — fixed behind all page content. */}
           <ParticleBackground />

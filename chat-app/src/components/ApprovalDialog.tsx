@@ -38,9 +38,9 @@ export function ApprovalDialog({
   const args = preview(approval.args_preview);
   return (
     <div className="fixed inset-0 z-[90] flex items-center justify-center p-3 no-print" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
-      <div className="absolute inset-0 bg-black/55" />
+      <div className="absolute inset-0 m-scrim" />
       <div
-        className="relative w-full max-w-md rounded-2xl border p-4 space-y-3 text-xs"
+        className="m-dialog relative w-full max-w-md rounded-2xl border p-4 space-y-3 text-xs"
         style={{ background: "var(--bg-card)", borderColor: "var(--border-subtle)", color: "var(--text-main)" }}
       >
         <h2 id="approval-title" className="text-sm font-bold flex items-center gap-2">
@@ -65,10 +65,10 @@ export function ApprovalDialog({
         </label>
         {error && <p className="text-rose-500 break-words">{error}</p>}
         <div className="flex flex-wrap justify-end gap-2">
-          <button type="button" disabled={busy} onClick={() => onDecide(false, remember)} className="px-3 py-1.5 rounded-xl border font-bold disabled:opacity-50" style={{ borderColor: "var(--border-subtle)" }}>
+          <button type="button" disabled={busy} onClick={() => onDecide(false, remember)} className="m-press m-hover px-3 py-1.5 rounded-xl border font-bold disabled:opacity-50" style={{ borderColor: "var(--border-subtle)" }}>
             Deny
           </button>
-          <button type="button" disabled={busy} onClick={() => onDecide(true, remember)} className="px-3 py-1.5 rounded-xl font-bold disabled:opacity-50" style={{ background: "var(--primary-gradient)", color: "var(--btn-text)" }}>
+          <button type="button" disabled={busy} onClick={() => onDecide(true, remember)} className="m-press px-3 py-1.5 rounded-xl font-bold disabled:opacity-50" style={{ background: "var(--primary-gradient)", color: "var(--btn-text)" }}>
             {busy ? "Working..." : "Approve"}
           </button>
         </div>

@@ -18,16 +18,21 @@ export function CitationChip({ citation, n }: { citation?: Citation; n: number }
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        aria-expanded={open}
         aria-label={`Citation ${n}: ${citation.filename}`}
-        className="mx-0.5 px-1.5 rounded-md text-[10px] font-extrabold border cursor-pointer"
+        className="m-press mx-0.5 px-1.5 rounded-md text-[10px] font-extrabold border cursor-pointer"
         style={{ background: "var(--badge-bg)", borderColor: "var(--badge-border)", color: "var(--primary-accent)" }}
       >
         {n}
       </button>
-      {open && (
+      {(
         <span
           role="tooltip"
-          className="absolute z-50 left-0 top-full mt-1 w-64 max-w-[80vw] p-2.5 rounded-xl border text-left text-[11px] shadow-xl whitespace-normal font-normal"
+          data-open={open}
+          aria-hidden={!open}
+          className="m-popover absolute z-50 left-0 top-full mt-1 w-64 max-w-[80vw] p-2.5 rounded-xl border text-left text-[11px] shadow-xl whitespace-normal font-normal"
           style={{ background: "var(--bg-card)", borderColor: "var(--border-subtle)", color: "var(--text-main)" }}
         >
           <span className="block font-bold truncate">{citation.filename}</span>

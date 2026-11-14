@@ -42,10 +42,10 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
   const textToRender = isStreaming ? displayedText : safeContent;
 
   return (
-    <div className="relative">
+    <div className="relative m-stream">
       <FormattedMarkdown content={textToRender} citations={citations} />
       {isStreaming && (
-        <span className="inline-block w-2 h-4 ml-1 bg-purple-400 animate-pulse rounded-xs vertical-middle" />
+        <span className="m-caret" aria-hidden="true" />
       )}
     </div>
   );
