@@ -162,3 +162,20 @@ def retrieve_multimodal_documents(
     from VENUAI.rag_server import load_metadata
     results = search_multimodal_regions(query, load_metadata(), allowed_doc_ids, top_k=top_k)
     return region_results_to_documents(results)
+
+
+# ── Visual-document retrieval (ColPali-style) is NOT available on this deployment ────────────
+# ColPali/ColQwen need a GPU-class vision-language model (3B+ params, page-image patch embeddings);
+# infeasible on the CPU-only target. The CPU alternative is what this module already does: OCR text
+# and table text of page regions are retrieved lexically and blended into hybrid retrieval
+# (retrieval.retrieve_documents include_regions). See Documents/AI/multimodal.md.
+
+def colpali_retrieve(*_args, **_kwargs):
+    """Env-gated stub. COLPALI_ENABLED=on without a real backend fails loudly instead of faking."""
+    import os
+    if os.getenv("COLPALI_ENABLED", "off").strip().lower() in ("1", "true", "on", "yes"):
+        raise NotImplementedError(
+            "COLPALI_ENABLED is set but no ColPali/ColQwen backend is installed: GPU-class model required. "
+            "Unset COLPALI_ENABLED to use the CPU OCR/caption region retrieval."
+        )
+    return []

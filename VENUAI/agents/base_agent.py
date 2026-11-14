@@ -5,7 +5,6 @@ Abstract base class and shared data structures for all specialist agents
 in the multi-agent system.
 """
 
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -81,6 +80,30 @@ class BaseSpecialistAgent:
         self.groq_client = groq_client
         self.top_k = top_k
 
+    # ── Retrieval (shared pipeline) ───────────────────────────────────────────
+
+    def _retrieve(
+        self, question: str, history: Optional[List[dict]], allowed_doc_ids: Optional[List[str]],
+    ) -> List[Document]:
+        """Specialists use the same hybrid retrieval as the main pipeline (VENUAI/retrieval.py):
+        dense + BM25 fusion, cross-encoder rerank + abstention floor, table/image regions, doc ACL."""
+        try:
+            from VENUAI import retrieval
+            getter = getattr(retrieval, "get_vectorstore", None)
+            if getter is None:
+                from VENUAI.rag_server import get_vector_store as getter  # local import: avoid cycle
+            res = retrieval.retrieve_documents(
+                getter(), question, self.top_k, allowed_doc_ids, history=history, rewrite=False,
+            )
+            docs = list(res.documents)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[{self.name}] Retrieval error: {e}")
+            return []
+        if self.metadata_filter:
+            docs = [d for d in docs if all((d.metadata or {}).get(k) == v for k, v in self.metadata_filter.items()
+                                           if not str(k).startswith("$"))]
+        return docs
+
     # ── Core query method ─────────────────────────────────────────────────────
 
     def query(
@@ -108,57 +131,29 @@ class BaseSpecialistAgent:
         Returns:
             AgentResult with answer, sources, and confidence estimate.
         """
-        from VENUAI.rag_server import get_vector_store  # local import to avoid circular deps
-
-        vs = get_vector_store()
-
-        where_clauses = []
-        if self.metadata_filter:
-            where_clauses.append(self.metadata_filter)
-        if allowed_doc_ids is not None:
-            where_clauses.append({"doc_id": {"$in": allowed_doc_ids or ["__none__"]}})
-        where_filter = (
-            {"$and": where_clauses} if len(where_clauses) > 1
-            else (where_clauses[0] if where_clauses else None)
-        )
-
-        retriever = vs.as_retriever(
-            search_type="similarity",
-            search_kwargs={
-                "k": self.top_k,
-                **({"filter": where_filter} if where_filter else {}),
-            },
-        )
-        try:
-            docs: List[Document] = retriever.invoke(question)
-        except Exception as e:
-            logger.warning(f"[{self.name}] Retrieval error: {e}")
-            docs = []
-
-        # Phase 5: fold in table/image region hits, same as the standard
-        # RAG, Agentic RAG, and ReAct paths. Not filtered by
-        # self.metadata_filter (a multimodal region carries no domain_tags
-        # metadata to filter on) — only by allowed_doc_ids, the
-        # authorization boundary every retrieval path shares. Best-effort:
-        # a lexical-search failure here must not break the text-chunk result.
-        try:
-            from VENUAI.multimodal_retrieval import retrieve_multimodal_documents
-            region_docs = retrieve_multimodal_documents(question, allowed_doc_ids, top_k=3)
-            if region_docs:
-                docs = list(docs) + region_docs
-        except Exception as region_err:
-            logger.warning(f"[{self.name}] multimodal region retrieval skipped: {region_err}")
+        docs = self._retrieve(question, history, allowed_doc_ids)
+        kb_used = False
+        if not docs:
+            # Built-in KB fallback: per-entry citable documents (VENUAI/kb_documents.py), never a raw
+            # JSON dump, and always labelled as built-in (kb_fallback metadata).
+            try:
+                from VENUAI.kb_documents import kb_fallback_documents
+                docs = kb_fallback_documents(question, k=self.top_k)
+                kb_used = bool(docs)
+            except Exception as kb_err:  # noqa: BLE001
+                logger.warning(f"[{self.name}] KB fallback unavailable: {kb_err}")
+                docs = []
 
         if not docs:
-            from VENUAI.rag_server import load_prefilled_kb
-            kb_data = load_prefilled_kb()
-            if kb_data:
-                kb_text = json.dumps(kb_data, indent=2, ensure_ascii=False)[:8000]
-                fake_doc = Document(
-                    page_content=f"DRDO Master Knowledge Base:\n{kb_text}",
-                    metadata={"filename": "DRDO Master Knowledge Base (Preloaded JSON)", "page": 0}
-                )
-                docs = [fake_doc]
+            # Abstain honestly: nothing retrieved from the user's documents and nothing in the built-in KB.
+            return AgentResult(
+                agent_name=self.name,
+                answer=("I could not find relevant information in your documents or the built-in "
+                        "knowledge base, so I will not guess."),
+                sources=[], retrieval_coverage=0.0,
+                reasoning=f"{self.name} abstained: no relevant context retrieved.",
+                documents=[],
+            )
 
         context = "\n\n".join(
             f"[{d.metadata.get('filename', 'Unknown')}, p.{d.metadata.get('page', 0)+1}]\n{d.page_content}"
@@ -175,7 +170,8 @@ class BaseSpecialistAgent:
         prompt = (
             f"{self.system_prompt}\n\n"
             f"Chat history:\n{history_str or 'None'}\n\n"
-            f"Context:\n{context or 'No relevant documents retrieved.'}\n\n"
+            f"{'NOTE: the context below comes from the built-in knowledge base, not the user documents.' + chr(10) if kb_used else ''}"
+            f"Context:\n{context}\n\n"
             f"Question: {question}\n\n"
             "Answer (formatted with headings, tables, and bullet points):"
         )

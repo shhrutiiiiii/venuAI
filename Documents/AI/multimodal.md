@@ -71,3 +71,8 @@ PyMuPDF + pdfplumber both re-parse the same PDF independently (two full passes) 
 
 ## Notes for Developers
 If you're tempted to add chart/diagram/equation detection via image heuristics (aspect ratio, color histogram, etc.) — don't, without updating this document and the standing regression test explicitly. Those heuristics are not the same thing as actually understanding the image's content, and presenting them as such is exactly the fabrication this phase was built to avoid.
+
+## CPU alternative to ColPali (Wave B, stream B2)
+ColPali / ColQwen retrieve page *images* with a vision-language model (3B+ parameters, patch-level late interaction). That needs a GPU-class runtime and a vision model this deployment does not have (see [`vision.md`](vision.md)), so it is **not implemented**. `multimodal_retrieval.colpali_retrieve()` is an env-gated stub: with `COLPALI_ENABLED=on` it raises `NotImplementedError` (fail loudly) instead of pretending.
+
+What runs on CPU instead: page regions (tables, images) carry OCR/table text from ingestion; `retrieve_multimodal_documents` scores that text lexically per authorised document and `retrieval.retrieve_documents(include_regions=True)` blends those region documents into the hybrid (dense + BM25 -> rerank) candidate pool, so a question answered by a table or a scanned figure caption can surface its region with page and bounding box provenance. Limits: image regions without OCR text have no retrievable content (the placeholder is never presented as a description), and purely visual questions (shapes, colours) cannot be answered. Reconsider ColPali only if a GPU host and a vision model are provisioned.
