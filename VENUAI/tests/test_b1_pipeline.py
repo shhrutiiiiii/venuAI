@@ -47,6 +47,8 @@ def test_escalation_only_below_threshold_and_capped(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "k")
     plan = model_cascade.CascadePlan(model_cascade.SIMPLE, "openai/gpt-oss-20b", "low")
     good = {"grounding_score": 0.6, "critique_passed": True, "hallucination_score": 0.0}
+    noisy = {"grounding_score": 0.3, "critique_passed": False, "contradicted_claim_count": 2, "hallucination_score": 0.3}
+    assert not model_cascade.should_escalate(plan, noisy, 0)
     bad = {"grounding_score": 0.05, "critique_passed": True, "hallucination_score": 0.0}
     assert not model_cascade.should_escalate(plan, good, 0)
     assert model_cascade.should_escalate(plan, bad, 0)
@@ -97,6 +99,9 @@ def test_corrective_not_triggered_for_good_or_blocked_or_kb():
     assert not corrective_rag.needs_correction(good)
     assert not corrective_rag.needs_correction({**_bad(), "blocked": True})
     assert not corrective_rag.needs_correction({**_bad(), "answer_basis": "builtin_knowledge_base"})
+    # critic / contradiction heuristics alone (no NLI corroboration) never trigger a loop
+    assert not corrective_rag.needs_correction({**_bad(), "hallucination_score": 0.2, "contradicted_claim_count": 3})
+    assert not corrective_rag.needs_correction({**_bad(), "hallucination_score": None})
     _, res = corrective_rag.run_corrective(good, regenerate=lambda *a: 1 / 0, re_retrieve=lambda fb: None)
     assert res.iterations == 0
 

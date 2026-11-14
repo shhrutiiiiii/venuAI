@@ -82,17 +82,17 @@ def llm_grade(question: str, docs) -> Optional[dict]:
 
 def needs_correction(state: dict) -> bool:
     """Measured evidence says the answer is poorly supported. The deterministic token-overlap
-    critic alone is too noisy on short answers, so it must be corroborated by the NLI
-    hallucination score; a contradicted claim is sufficient on its own."""
+    critic / numeric-contradiction heuristics are noisy (a correct "520 km" claim is flagged
+    contradicted when a sibling document says 450 km), so they only count when the NLI
+    hallucination score corroborates them."""
     if state.get("blocked") or state.get("answer_basis") not in (None, "uploaded_documents"):
         return False
     if state.get("insufficient_context"):
         return False
-    if (state.get("contradicted_claim_count") or 0) > 0:
-        return True
     h = state.get("hallucination_score")
-    return (state.get("critique_passed") is False and (state.get("unsupported_claim_count") or 0) > 0
-            and h is not None and h >= 0.5)
+    if h is None or h < 0.5:
+        return False
+    return (state.get("critique_passed") is False or (state.get("contradicted_claim_count") or 0) > 0) and         ((state.get("unsupported_claim_count") or 0) + (state.get("contradicted_claim_count") or 0)) > 0
 
 
 def unsupported_claims(state: dict) -> List[str]:

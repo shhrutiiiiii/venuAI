@@ -100,16 +100,14 @@ def escalation_plan() -> CascadePlan:
 
 
 def verifier_unhappy(ver: dict) -> bool:
-    """True when measured verifier output says the answer is poorly supported: a contradicted
-    claim, critic + NLI agreeing, or a (token-overlap) grounding score near zero."""
+    """True when measured verifier output says the answer is poorly supported: NLI hallucination
+    score >= 0.5 corroborated by the critic, or a (token-overlap) grounding score near zero."""
     g = ver.get("grounding_score")
     if g is not None and g < escalate_grounding_below():
         return True
-    if (ver.get("contradicted_claim_count") or 0) > 0:
-        return True
     h = ver.get("hallucination_score")
-    return (ver.get("critique_passed") is False and (ver.get("unsupported_claim_count") or 0) > 0
-            and h is not None and h >= 0.5)
+    return (h is not None and h >= 0.5 and (ver.get("critique_passed") is False
+                                            or (ver.get("contradicted_claim_count") or 0) > 0))
 
 
 def should_escalate(plan: CascadePlan, ver: dict, escalations_used: int, downshift: bool = False) -> bool:
