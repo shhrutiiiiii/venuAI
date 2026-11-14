@@ -13,6 +13,13 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(req: NextRequest) {
   try {
+    // Preferred: the authenticated /capabilities endpoint (works in production where /openapi.json is off).
+    const direct = await fetch(`${RAG_SERVER}/capabilities`, { cache: "no-store", headers: authHeader(req), signal: AbortSignal.timeout(8_000) });
+    if (direct.ok) {
+      const c = (await direct.json()) as Partial<Capabilities>;
+      return NextResponse.json({ ...NO_CAPABILITIES, ...c });
+    }
+    // Fallback for older backends: read the OpenAPI path list.
     const res = await fetch(`${RAG_SERVER}/openapi.json`, { cache: "no-store", headers: authHeader(req), signal: AbortSignal.timeout(8_000) });
     if (!res.ok) return NextResponse.json(NO_CAPABILITIES);
     const spec = (await res.json()) as { paths?: Record<string, unknown> };

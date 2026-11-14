@@ -234,7 +234,8 @@ def search_drdo_knowledge_base(query: str, top_k: int = 5) -> str:
         p = current_principal()
         return _search_kb(query, max(1, min(int(top_k), 20)), allowed_doc_ids=_visible_doc_ids(p))
     except Exception as e:
-        return f"Search failed: {str(e)}"
+        logger.error("tool failed: %s", type(e).__name__, exc_info=e)
+        return f"Search failed: ({type(e).__name__}; details in server log)"
 
 
 @mcp.tool()
@@ -284,7 +285,8 @@ def upload_document(file_path: str) -> str:
             f"**Pages:** {result['pages']} | **Chunks:** {result['chunks']}"
         )
     except Exception as e:
-        return f"Upload failed: {str(e)}"
+        logger.error("tool failed: %s", type(e).__name__, exc_info=e)
+        return f"Upload failed: ({type(e).__name__}; details in server log)"
 
 
 @mcp.tool()
@@ -333,7 +335,8 @@ def query_with_rag(question: str, session_id: str = "") -> str:
             f"📚 **Sources:**\n{sources_md or 'Preloaded knowledge base.'}"
         )
     except Exception as e:
-        return f"RAG query failed: {str(e)}\n\nEnsure rag_server.py is running on port 8000."
+        logger.error("tool failed: %s", type(e).__name__, exc_info=e)
+        return f"RAG query failed: ({type(e).__name__}; details in server log)\n\nEnsure rag_server.py is running on port 8000."
 
 
 # ── Prompts ──────────────────────────────────────────────────────────────────────

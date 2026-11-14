@@ -150,7 +150,7 @@ def _classify_call(kind: str, messages: List[dict], max_tokens: int, timeout: fl
             return out
         except Exception as e:  # noqa: BLE001
             last = e
-            _record(kind, model, (time.time() - t0) * 1000, False, str(e))
+            _record(kind, model, (time.time() - t0) * 1000, False, type(e).__name__)
     raise last or RuntimeError(f"no {kind} model configured")
 
 

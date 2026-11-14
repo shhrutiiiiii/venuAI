@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authHeader } from "@/lib/serverAuthHeader";
+import { upstreamErrorResponse } from "@/lib/proxyErrors";
 
 const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
 
@@ -39,6 +40,8 @@ export async function proxyToBackend(req: NextRequest, path: string, opts: Proxy
       cache: "no-store",
       signal: AbortSignal.timeout(opts.timeoutMs ?? 60_000),
     });
+    // 5xx (and non-JSON error bodies) are normalised: no raw upstream text reaches the browser.
+    if (res.status >= 500) return await upstreamErrorResponse(res);
     const out = new Headers();
     for (const h of ["content-type", "content-disposition"]) {
       const v = res.headers.get(h);
