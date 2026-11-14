@@ -11,6 +11,11 @@ Failure semantics (never pretend a check passed):
   * Safeguard failure    -> status "unavailable" (fail-open, logged, surfaced to the
                             client as safety_check="unavailable").
 
+Model ids come from the gateway registry capabilities (PROMPT_GUARD / SAFETY), tried in order as a
+fallback chain; PROMPT_GUARD_MODEL / SAFEGUARD_MODEL override the head of the chain, and
+PROMPT_GUARD_FALLBACK_MODELS / SAFEGUARD_FALLBACK_MODELS append more. The *_DEFAULT constants are only
+used if the registry cannot be read. All calls use the central client (ai_gateway.provider.get_groq_client).
+
 Env: PROMPT_GUARD_ENABLED (default true), PROMPT_GUARD_MODEL, PROMPT_GUARD_TIMEOUT (s, 4),
      PROMPT_GUARD_THRESHOLD (0.8), SAFEGUARD_ENABLED (default true), SAFEGUARD_MODEL,
      SAFEGUARD_TIMEOUT (s, 12).
@@ -100,14 +105,74 @@ def _parse_guard_output(raw: str) -> Optional[float]:
     return None
 
 
+def _registry_chain(capability_name: str, env_var: str, extra_env: str = "", default: str = "") -> List[str]:
+    """Ordered model ids for a classifier capability: explicit env override first, then every enabled
+    registry model with that capability, then optional extra fallbacks. Model ids are never hardcoded
+    in call sites; the registry (ai_gateway/model_registry.py) is the source of truth."""
+    chain: List[str] = []
+    if os.getenv(env_var):
+        chain.append(os.getenv(env_var, "").strip())
+    try:
+        from VENUAI.ai_gateway.model_registry import ModelCapability, get_models_with_capability
+        cap = getattr(ModelCapability, capability_name)
+        chain += [m.model_id for m in get_models_with_capability(cap, enabled_only=True)]
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[Safety] registry lookup failed for {capability_name}: {e}")
+    if not chain and default:
+        chain.append(default)
+    if extra_env:
+        chain += [m.strip() for m in os.getenv(extra_env, "").split(",") if m.strip()]
+    seen, out = set(), []
+    for m in chain:
+        if m and m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
+def classifier_chain(kind: str) -> List[str]:
+    if kind == "prompt_guard":
+        return _registry_chain("PROMPT_GUARD", "PROMPT_GUARD_MODEL", "PROMPT_GUARD_FALLBACK_MODELS",
+                               PROMPT_GUARD_MODEL_DEFAULT)
+    return _registry_chain("SAFETY", "SAFEGUARD_MODEL", "SAFEGUARD_FALLBACK_MODELS", SAFEGUARD_MODEL_DEFAULT)
+
+
+def _classify_call(kind: str, messages: List[dict], max_tokens: int, timeout: float) -> str:
+    """Try each model of the capability chain through the central Groq client (`_groq_chat`) with
+    gateway-style telemetry; raise the last error if all fail."""
+    import time
+    last: Optional[Exception] = None
+    for model in classifier_chain(kind):
+        t0 = time.time()
+        try:
+            out = _groq_chat(model, messages, max_tokens, timeout)
+            _record(kind, model, (time.time() - t0) * 1000, True, None)
+            return out
+        except Exception as e:  # noqa: BLE001
+            last = e
+            _record(kind, model, (time.time() - t0) * 1000, False, str(e))
+    raise last or RuntimeError(f"no {kind} model configured")
+
+
+def _record(kind: str, model: str, latency_ms: float, ok: bool, err: Optional[str]) -> None:
+    try:
+        from VENUAI.ai_gateway import telemetry
+        telemetry.record(telemetry.RoutingLogEntry(
+            task_type=f"safety_{kind}", requested_chain=model, model_used=model if ok else None,
+            provider="groq", fallback_count=0, latency_ms=latency_ms, input_tokens=None,
+            output_tokens=None, success=ok, error=err,
+        ))
+    except Exception:  # noqa: BLE001 - telemetry must never break a safety check
+        pass
+
+
 def prompt_guard_score(text: str) -> Optional[float]:
     """Injection probability in [0,1], or None when disabled/unavailable (caller uses regex only)."""
     if not prompt_guard_enabled() or not text or not text.strip():
         return None
-    model = os.getenv("PROMPT_GUARD_MODEL", PROMPT_GUARD_MODEL_DEFAULT)
     timeout = float(os.getenv("PROMPT_GUARD_TIMEOUT", "4"))
     try:
-        raw = _groq_chat(model, [{"role": "user", "content": text[:2000]}], 8, timeout)
+        raw = _classify_call("prompt_guard", [{"role": "user", "content": text[:2000]}], 8, timeout)
         score = _parse_guard_output(raw)
         if score is None:
             logger.warning("[PromptGuard] unparseable output; falling back to regex guardrails")
@@ -133,11 +198,10 @@ def safeguard_classify(text: str) -> dict:
         return {"status": "disabled", "category": None, "rationale": "SAFEGUARD_ENABLED=false"}
     if not text or not text.strip():
         return {"status": "passed", "category": None, "rationale": "empty"}
-    model = os.getenv("SAFEGUARD_MODEL", SAFEGUARD_MODEL_DEFAULT)
     timeout = float(os.getenv("SAFEGUARD_TIMEOUT", "12"))
     try:
-        raw = _groq_chat(
-            model,
+        raw = _classify_call(
+            "safeguard",
             [{"role": "system", "content": SAFEGUARD_POLICY},
              {"role": "user", "content": text[:6000]}],
             400, timeout,

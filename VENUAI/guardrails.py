@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from VENUAI.pii_redaction import redact, redact_identifiers
+
 logger = logging.getLogger("drdo-rag")
 
 DB_PATH = Path("VENUAI/data/guardrails_audit.db")
@@ -182,7 +184,7 @@ class GuardrailEngine:
                 conn.execute(
                     "INSERT INTO guardrail_logs (timestamp, user_id, query, violation_type, action_taken, message) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
-                    (datetime.now(timezone.utc).isoformat(), user_id or "anonymous", query[:200], violation_type, action, msg)
+                    (datetime.now(timezone.utc).isoformat(), user_id or "anonymous", redact(query[:200]), violation_type, action, redact(msg))
                 )
         except Exception as e:
             logger.error(f"[GuardrailEngine] Failed to audit log: {e}")
@@ -284,6 +286,10 @@ class GuardrailEngine:
             if pat.search(text):
                 text = pat.sub(repl, text)
                 violations.append(kind)
+        masked = redact_identifiers(text)
+        if masked != text:
+            text = masked
+            violations.append("pii_identifier")
         if violations:
             self.log_violation(user_id, "", ",".join(sorted(set(violations))), "sanitize", "sensitive tokens redacted from output")
 

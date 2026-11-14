@@ -114,3 +114,92 @@ class ContradictionAgent:
             else:
                 updated.append(claim)
         return updated
+
+
+# ── Cross-chunk contradiction finding (Wave B contract 2.3) ────────────────────────────────────
+
+_SENT = re.compile(r"(?<=[.!?])\s+|\n+")
+_WORD = re.compile(r"[a-z][a-z0-9\-]{2,}")
+_FILLER = frozenset(
+    "the and for with that this from have has had was were are its their which also been into over "
+    "than then they them such more most only other about between while per".split()
+)
+
+
+def _chunk_parts(chunk) -> tuple:
+    """(text, doc label) from a Document, dict or plain string."""
+    if isinstance(chunk, str):
+        return chunk, None
+    if isinstance(chunk, dict):
+        return str(chunk.get("text") or chunk.get("page_content") or ""), (
+            chunk.get("doc") or chunk.get("filename") or chunk.get("doc_id"))
+    meta = getattr(chunk, "metadata", None) or {}
+    return getattr(chunk, "page_content", ""), (meta.get("filename") or meta.get("doc_id") or meta.get("source"))
+
+
+def _unit_numbers(sentence: str) -> List[tuple]:
+    text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", sentence)
+    out = []
+    for m in _NUMBER_WITH_UNIT.finditer(text):
+        unit = (m.group(2) or "").lower()
+        if not unit:
+            continue  # unitless numbers (years, ids, counts) are too ambiguous to call a conflict
+        try:
+            out.append((float(m.group(1)), unit, m.span()))
+        except ValueError:
+            continue
+    return out
+
+
+def _subject_tokens(sentence: str) -> set:
+    return {w for w in _WORD.findall(sentence.lower()) if w not in _FILLER}
+
+
+def find_contradictions(answer: str, chunks: list, max_results: int = 5) -> List[dict]:
+    """
+    Cross-source numeric contradictions among the evidence chunks that the answer relies on.
+
+    Two sentences from DIFFERENT chunks/documents conflict when they share a subject (3+ content
+    words, and at least 2 of those also appear in the answer) and report the same unit with values
+    differing by >= 15%. Deterministic, no LLM, no network. Returns
+    ``[{"claim_a","claim_b","doc_a","doc_b"}]`` (empty when nothing is found - never invented).
+    """
+    answer_tokens = _subject_tokens(answer or "")
+    sents = []  # (chunk_index, doc_label, sentence, tokens, numbers)
+    for ci, chunk in enumerate(chunks or []):
+        text, doc = _chunk_parts(chunk)
+        for s in _SENT.split(text or ""):
+            s = s.strip()
+            if len(s) < 15:
+                continue
+            nums = _unit_numbers(s)
+            if nums:
+                sents.append((ci, doc or f"chunk-{ci + 1}", s, _subject_tokens(s), nums))
+    found: List[dict] = []
+    seen = set()
+    for i in range(len(sents)):
+        ci, da, sa, ta, na = sents[i]
+        for j in range(i + 1, len(sents)):
+            cj, db, sb, tb, nb = sents[j]
+            if ci == cj:
+                continue
+            shared = ta & tb
+            if len(shared) < 3 or len(shared & answer_tokens) < 2:
+                continue
+            for va, ua, _ in na:
+                for vb, ub, _ in nb:
+                    if ua != ub or max(abs(va), abs(vb)) == 0:
+                        continue
+                    if abs(va - vb) / max(abs(va), abs(vb)) >= RELATIVE_DIFFERENCE_THRESHOLD:
+                        key = (sa, sb)
+                        if key not in seen:
+                            seen.add(key)
+                            found.append({"claim_a": sa[:300], "claim_b": sb[:300],
+                                          "doc_a": str(da), "doc_b": str(db)})
+                        break
+                else:
+                    continue
+                break
+            if len(found) >= max_results:
+                return found
+    return found
