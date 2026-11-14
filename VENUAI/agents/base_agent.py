@@ -190,7 +190,7 @@ class BaseSpecialistAgent:
             answer = result.content
         except Exception as e:
             logger.error(f"[{self.name}] LLM call failed: {e}")
-            answer = f"⚠️ {self.name} encountered an error: {str(e)}"
+            answer = f"⚠️ {self.name} encountered an error: ({type(e).__name__}; details in server log)"
 
         # Build sources
         sources = []

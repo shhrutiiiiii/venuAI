@@ -93,7 +93,7 @@ def _extract_image_regions(doc, page, document_id: str, page_number: int, run_oc
             try:
                 ocr_text = ocr_provider.extract_text(image_bytes)
             except OCRProviderUnavailableError as e:
-                ocr_unavailable_reason = str(e)
+                ocr_unavailable_reason = "OCR provider unavailable"
 
         regions.append(DocumentRegion(
             document_id=document_id,

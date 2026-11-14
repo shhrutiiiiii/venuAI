@@ -477,7 +477,7 @@ class ResearchRunner:
             self._emit(job_id, {"done": True, "status": "cancelled"})
         except Exception as e:  # noqa: BLE001
             logger.exception("[research] job %s failed", job_id)
-            self.store.update_job(job_id, status="failed", error=f"{type(e).__name__}: {str(e)[:300]}")
+            self.store.update_job(job_id, status="failed", error=type(e).__name__)
             self._emit(job_id, {"done": True, "status": "failed"})
 
     def _synthesize(self, job_id, question, user_id, subs, answered, partial, why) -> dict:

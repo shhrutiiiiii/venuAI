@@ -325,7 +325,7 @@ def resume(approval_id: str, user: Any) -> dict:
         result = fn(args)
         status, err = "ok", None
     except Exception as e:
-        result, status, err = None, "error", str(e)
+        result, status, err = None, "error", type(e).__name__
     try:
         from VENUAI import tracing
         tracing.record_tool_call(tool, args, decision="approved", approver=row["approver"], status=status,

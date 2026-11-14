@@ -60,7 +60,8 @@ def _calculate(expression: str) -> str:
     except ZeroDivisionError:
         return "Error: Division by zero."
     except Exception as e:
-        return f"Calculation error: {str(e)}. Expression: '{expression}'"
+        logger.error("tool failed: %s", type(e).__name__, exc_info=e)
+        return f"Calculation error: ({type(e).__name__}; details in server log). Expression: '{expression}'"
 
 
 def _search_web_drdo(query: str) -> str:
@@ -98,7 +99,7 @@ def _search_web_drdo(query: str) -> str:
         )
     except Exception as e:
         logger.error(f"[web_search_drdo] Error: {e}")
-        return f"Web search failed: {str(e)}"
+        return f"Web search failed: ({type(e).__name__}; details in server log)"
 
 
 def _run_code(code: str) -> str:
@@ -119,7 +120,7 @@ def _run_code(code: str) -> str:
         return f"Code execution sandbox unavailable: {e}"
     except Exception as e:
         logger.error(f"[code_execution] Error: {e}")
-        return f"Code execution failed: {str(e)}"
+        return f"Code execution failed: ({type(e).__name__}; details in server log)"
 
 
 def _search_kb(
@@ -165,7 +166,7 @@ def _search_kb(
         return "\n\n---\n\n".join(parts)
     except Exception as e:
         logger.error(f"[drdo_kb_search] Error: {e}")
-        return f"Knowledge base search failed: {str(e)}"
+        return f"Knowledge base search failed: ({type(e).__name__}; details in server log)"
 
 
 def _recall_memory(query: str, user_id: str) -> str:
@@ -181,7 +182,7 @@ def _recall_memory(query: str, user_id: str) -> str:
         return "\n\n".join(parts) if parts else "No relevant past memories found."
     except Exception as e:
         logger.error(f"[memory_recall] Error: {e}")
-        return f"Memory recall failed: {str(e)}"
+        return f"Memory recall failed: ({type(e).__name__}; details in server log)"
 
 
 def _summarize_document(doc_id: str, allowed_doc_ids: Optional[List[str]]) -> str:
@@ -210,7 +211,7 @@ def _summarize_document(doc_id: str, allowed_doc_ids: Optional[List[str]]) -> st
         )
     except Exception as e:
         logger.error(f"[document_summary] Error: {e}")
-        return f"Document summary failed: {str(e)}"
+        return f"Document summary failed: ({type(e).__name__}; details in server log)"
 
 
 def _list_kb(allowed_doc_ids: Optional[List[str]]) -> str:
@@ -238,7 +239,7 @@ def _list_kb(allowed_doc_ids: Optional[List[str]]) -> str:
         return "\n".join(lines)
     except Exception as e:
         logger.error(f"[list_knowledge_base] Error: {e}")
-        return f"Failed to list knowledge base: {str(e)}"
+        return f"Failed to list knowledge base: ({type(e).__name__}; details in server log)"
 
 
 # ── Module-level, unfiltered tools ─────────────────────────────────────────────
@@ -427,11 +428,12 @@ def guarded_call(tool_id: str, args: dict, fn, *, user_id: str, tenant_id: str =
                 text = text[:cap] + f"\n...[truncated {len(text) - cap} chars]"
             ledger("ok", decision_label, appr.approver, (_time.perf_counter() - t0) * 1000)
             return text
-        except TimeoutError as e:
-            last_err = str(e)
+        except TimeoutError:
+            last_err = "the tool timed out"
             break                                   # a hung tool is not retried
         except Exception as e:
-            last_err = f"{type(e).__name__}: {e}"
+            logger.error("[tool %s] attempt %d failed: %s", tool_id, attempt, type(e).__name__, exc_info=e)
+            last_err = type(e).__name__
             _time.sleep(0.2 * (attempt + 1))
     policy_engine.tool_breaker.failure(tool_id)
     ledger("error", error=last_err, latency=(_time.perf_counter() - t0) * 1000)

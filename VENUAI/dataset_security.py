@@ -75,7 +75,9 @@ async def validate_and_parse_dataset(file: UploadFile) -> Tuple[bytes, pd.DataFr
         else:
             df = pd.read_excel(BytesIO(content))
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse dataset: {e}")
+        import logging
+        logging.getLogger("drdo-rag").warning("dataset parse failed: %s", type(e).__name__, exc_info=e)
+        raise HTTPException(status_code=422, detail="Failed to parse dataset. Check that it is a valid CSV/XLSX file.")
 
     if df.shape[0] > MAX_ROWS:
         raise HTTPException(

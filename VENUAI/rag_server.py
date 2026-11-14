@@ -28,11 +28,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Request, UploadFile, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 from VENUAI import auth
 from VENUAI.ai_gateway.provider import get_groq_client, get_chat_groq
@@ -96,33 +92,26 @@ def load_prefilled_kb() -> dict:
     return {}
 
 # ── FastAPI App ────────────────────────────────────────────────────────────────
+# Production start-up validation (weak JWT secret, wildcard CORS, debug flags, demo
+# seeding...) fails fast here; /docs, /redoc and /openapi.json are off in production
+# unless ENABLE_DOCS=1. Headers/CORS/limits/error handlers: VENUAI/http_security.py
+# (ADR-S4.1, Documents/Backend/http-security.md).
+from VENUAI import config as _config
+from VENUAI import http_security
+
+_config.enforce_config()
 app = FastAPI(
     title="DRDO VenuAI RAG Server",
     description="Knowledge Base RAG pipeline for DRDO research documents",
     version="1.1.0",
+    **_config.docs_kwargs(),
 )
 
-# CORS origins are environment-driven, not hardcoded, so this can run anywhere
-# other than a developer's own machine without editing source. See
-# Documents/Backend/architecture.md Security Considerations.
-_allowed_origins = [
-    o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
-    if o.strip()
-]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── Rate limiting ────────────────────────────────────────────────────────────
-# Prevents brute-force login attempts and abusive/expensive query floods.
-# See Documents/future-additions.md Track A item 10.
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Rate limiting: per-user key (JWT subject) falling back to the trusted-proxy-aware IP.
+# Per-route @limiter.limit decorators below stay; http_security adds the global,
+# per-IP and daily LLM-cost buckets. See Documents/future-additions.md Track A item 10.
+limiter = http_security.build_limiter()
+http_security.register_security(app, limiter)
 
 # ── Optional Wave B routers ──────────────────────────────────────────────────
 # Streams add endpoints by creating VENUAI/<name>.py exposing `router`
@@ -453,9 +442,9 @@ def oauth_login(provider: str, redirect_uri: str):
     try:
         return OAuthAuthorizeResponse(authorize_url=build_authorize_url(provider, redirect_uri))
     except OAuthNotConfiguredError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise http_security.safe_error(e, "This sign-in provider is not configured.", 503)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise http_security.safe_error(e, "Invalid sign-in request.", 400)
 
 
 class OAuthCallbackRequest(BaseModel):
@@ -483,11 +472,11 @@ def oauth_callback(request: Request, provider: str, body: OAuthCallbackRequest):
     try:
         profile = exchange_code_for_user(provider, body.code, body.redirect_uri)
     except OAuthNotConfiguredError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise http_security.safe_error(e, "This sign-in provider is not configured.", 503)
     except OAuthExchangeError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        raise http_security.safe_error(e, "Sign-in with the provider failed.", 502)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise http_security.safe_error(e, "Invalid sign-in request.", 400)
 
     user_row = auth.get_user_by_email(profile["email"])
     if user_row is None:
@@ -797,7 +786,7 @@ async def upload_document(
         raw_pages = loader.load()
     except Exception as e:
         save_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail=f"Failed to parse PDF: {str(e)}")
+        raise http_security.safe_error(e, "Failed to parse PDF.", 422)
 
     num_pages = len(raw_pages)
 
@@ -2218,7 +2207,7 @@ async def upload_multimodal_document(
         raise
     except Exception as e:
         save_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail=f"Failed to process PDF for multimodal extraction: {e}")
+        raise http_security.safe_error(e, "Failed to process PDF for multimodal extraction.", 422)
 
     summary = mm_doc.to_summary_dict()
     from datetime import datetime
@@ -2914,4 +2903,5 @@ def get_evidence_record(record_id: str, current_user: AuthenticatedUser = Depend
 # ── Entry Point ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("rag_server:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("rag_server:app", host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8000")),
+                reload=False, server_header=False, timeout_keep_alive=15, limit_concurrency=int(os.getenv("LIMIT_CONCURRENCY", "200")))
