@@ -2,27 +2,23 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import ThemeToggle from "@/components/ThemeToggle";
+import PageShell from "@/components/pages/PageShell";
+import { CountUp, EmptyState, PageSpinner, SkeletonRows, SkeletonTiles, StatTile, Meter } from "@/components/pages/primitives";
 import {
   Building2,
   FileText,
   Database,
   Network,
   Bot,
-  ArrowLeft,
-  RefreshCw,
   Search,
   Trash2,
   Loader2,
   ChevronRight,
   Cpu,
-  Shield,
   UserPlus,
   Users,
   Pencil,
-  FileSearch,
 } from "lucide-react";
-import Link from "next/link";
 import GraphVisualization from "@/components/GraphVisualization";
 
 type Tab = "overview" | "documents" | "datasets" | "graph" | "agents" | "team";
@@ -282,65 +278,33 @@ export default function WorkspacePage() {
     }
   };
 
-  if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <RefreshCw className="w-6 h-6 animate-spin" style={{ color: "var(--primary-accent)" }} />
-      </div>
-    );
-  }
+  if (isLoading) return <PageSpinner />;
+
+  const isAdmin = user?.role === "admin";
+  const firstLoad = loading && !tenant;
 
   return (
-    <div className="min-h-screen p-6 md:p-10" style={{ color: "var(--text-main)" }}>
-      <div className="max-w-6xl mx-auto space-y-6">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b pb-6" style={{ borderColor: "var(--border-subtle)" }}>
-          <div>
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-xl" style={{ background: "var(--badge-bg)", border: "1px solid var(--badge-border)", color: "var(--badge-text)" }}>
-                <Building2 className="w-6 h-6" />
-              </div>
-              <div>
-                <h1 className="text-2xl font-bold">Research Workspace</h1>
-                <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                  {tenant ? `${tenant.name} · ${tenant.tenant_id}` : "Loading organization…"}
-                </p>
-              </div>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={loadAll}
-              disabled={loading}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-medium transition-all"
-              style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)", color: "var(--text-main)" }}
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-              <span>Refresh</span>
-            </button>
-            <ThemeToggle />
-            <Link href="/evidence" className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)", color: "var(--text-main)" }}>
-              <FileSearch className="w-3.5 h-3.5" /> Evidence Explorer
-            </Link>
-            {user?.role === "admin" && (
-              <Link href="/security" className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)", color: "var(--text-main)" }}>
-                <Shield className="w-3.5 h-3.5" /> Security Center
-              </Link>
-            )}
-            <Link href="/chat" className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold" style={{ background: "var(--primary-gradient)", color: "var(--btn-text)" }}>
-              <ArrowLeft className="w-4 h-4" /> Back to Chat
-            </Link>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1.5 p-1.5 rounded-2xl" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
+    <PageShell
+      current="workspace"
+      title="Research workspace"
+      icon={Building2}
+      isAdmin={isAdmin}
+      onRefresh={loadAll}
+      refreshing={loading}
+      subtitle={tenant ? `${tenant.name} (${tenant.tenant_id})` : "Loading organization"}
+    >
+        <div role="tablist" aria-label="Workspace sections" className="p-tabs flex items-center gap-1 p-1.5 rounded-2xl overflow-x-auto" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
           {TABS.map((t) => {
             const Icon = t.icon;
             const active = tab === t.id;
             return (
               <button
                 key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
                 onClick={() => setTab(t.id)}
-                className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold transition-all ${active ? "shadow-sm" : "opacity-70 hover:opacity-100"}`}
+                className="p-tab flex-1 sm:flex-none flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold whitespace-nowrap"
                 style={{
                   background: active ? "var(--bg-card)" : "transparent",
                   color: active ? "var(--text-main)" : "var(--text-muted)",
@@ -354,30 +318,32 @@ export default function WorkspacePage() {
           })}
         </div>
 
+        <div key={tab} className="p-fade-in space-y-5">
         {tab === "overview" && (
+          firstLoad ? <SkeletonTiles count={3} /> : (
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <StatCard icon={FileText} label="Documents" value={documents.length} />
-            <StatCard icon={Database} label="Datasets" value={datasets.length} />
-            <StatCard icon={Bot} label="Registered Agents" value={agents.length} />
-          </div>
+            <StatTile index={0} icon={FileText} label="Documents"><CountUp value={documents.length} /></StatTile>
+            <StatTile index={1} icon={Database} label="Datasets"><CountUp value={datasets.length} /></StatTile>
+            <StatTile index={2} icon={Bot} label="Registered agents"><CountUp value={agents.length} /></StatTile>
+          </div>)
         )}
 
         {tab === "documents" && (
-          <div className="rounded-2xl p-5" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}>
+          <div className="p-surface p-4 sm:p-5 min-w-0">
             <h3 className="text-sm font-bold mb-3">Documents in your tenant</h3>
-            {documents.length === 0 ? (
+            {firstLoad ? <SkeletonRows count={3} /> : documents.length === 0 ? (
               <EmptyState text="No documents yet. Upload one from the RAG workspace in Chat." />
             ) : (
-              <div className="space-y-2">
-                {documents.map((d) => (
-                  <div key={d.id} className="flex items-center justify-between p-3 rounded-xl" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
+              <div className="space-y-2 p-stagger">
+                {documents.map((d, i) => (
+                  <div key={d.id} style={{ ["--i" as string]: Math.min(i, 10) }} className="p-inset p-row flex items-center justify-between gap-3 p-3">
                     <div>
                       <div className="text-sm font-semibold">{d.filename}</div>
                       <div className="text-[11px]" style={{ color: "var(--text-subtle)" }}>
                         {d.pages} pages · {d.chunks} chunks · {d.size_kb} KB
                       </div>
                     </div>
-                    <button onClick={() => deleteDocument(d.id)} className="p-2 rounded-lg hover:bg-red-500/10 text-red-500">
+                    <button onClick={() => deleteDocument(d.id)} aria-label={`Delete ${d.filename}`} className="p-btn shrink-0" style={{ color: "var(--p-bad)", padding: 8 }}>
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
@@ -388,21 +354,21 @@ export default function WorkspacePage() {
         )}
 
         {tab === "datasets" && (
-          <div className="rounded-2xl p-5" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}>
+          <div className="p-surface p-4 sm:p-5 min-w-0">
             <h3 className="text-sm font-bold mb-3">Datasets in your tenant</h3>
-            {datasets.length === 0 ? (
+            {firstLoad ? <SkeletonRows count={3} /> : datasets.length === 0 ? (
               <EmptyState text="No datasets yet. Upload one from the Data Analyst tab in Chat." />
             ) : (
-              <div className="space-y-2">
-                {datasets.map((d) => (
-                  <div key={d.id} className="flex items-center justify-between p-3 rounded-xl" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
+              <div className="space-y-2 p-stagger">
+                {datasets.map((d, i) => (
+                  <div key={d.id} style={{ ["--i" as string]: Math.min(i, 10) }} className="p-inset p-row flex items-center justify-between gap-3 p-3">
                     <div>
                       <div className="text-sm font-semibold">{d.filename}</div>
                       <div className="text-[11px]" style={{ color: "var(--text-subtle)" }}>
                         {d.row_count} rows · {d.columns.length} columns · {d.size_kb} KB
                       </div>
                     </div>
-                    <button onClick={() => deleteDataset(d.id)} className="p-2 rounded-lg hover:bg-red-500/10 text-red-500">
+                    <button onClick={() => deleteDataset(d.id)} aria-label={`Delete ${d.filename}`} className="p-btn shrink-0" style={{ color: "var(--p-bad)", padding: 8 }}>
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
@@ -414,7 +380,7 @@ export default function WorkspacePage() {
 
         {tab === "graph" && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <div className="rounded-2xl p-5 space-y-4" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}>
+            <div className="p-surface p-4 sm:p-5 space-y-4 min-w-0">
               <h3 className="text-sm font-bold">Search the knowledge graph</h3>
               <div className="flex gap-2">
                 <input
@@ -422,20 +388,19 @@ export default function WorkspacePage() {
                   onChange={(e) => setGraphQuery(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && runGraphSearch()}
                   placeholder="Entity name, e.g. LRDE"
-                  className="flex-1 px-3 py-2 rounded-xl text-sm outline-none"
-                  style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)", color: "var(--text-main)" }}
+                  className="p-field flex-1 px-3 py-2 rounded-xl text-sm"
                 />
-                <button onClick={runGraphSearch} disabled={graphSearching} className="px-3.5 py-2 rounded-xl text-xs font-semibold" style={{ background: "var(--primary-gradient)", color: "var(--btn-text)" }}>
+                <button onClick={runGraphSearch} disabled={graphSearching} aria-label="Search" className="p-btn p-btn-primary">
                   {graphSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
                 </button>
               </div>
               <div className="space-y-1.5 max-h-72 overflow-y-auto">
-                {graphResults.map((e) => (
+                {graphResults.map((e, i) => (
                   <button
                     key={e.entity_id}
+                    style={{ animationDelay: `${Math.min(i, 10) * 30}ms` }}
                     onClick={() => openEntity(e.entity_id)}
-                    className="w-full flex items-center justify-between p-2.5 rounded-lg text-left text-xs hover:opacity-90"
-                    style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}
+                    className="p-inset p-row p-rise w-full flex items-center justify-between gap-2 p-2.5 text-left text-xs"
                   >
                     <span className="font-semibold">{e.name}</span>
                     <span className="flex items-center gap-1" style={{ color: "var(--text-subtle)" }}>
@@ -453,17 +418,16 @@ export default function WorkspacePage() {
                   onChange={(e) => setExtractText(e.target.value)}
                   rows={3}
                   placeholder="Paste a paragraph mentioning a lab, system, or technology…"
-                  className="w-full px-3 py-2 rounded-xl text-xs outline-none resize-none"
-                  style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)", color: "var(--text-main)" }}
+                  className="p-field w-full px-3 py-2 rounded-xl text-xs resize-none"
                 />
-                {extractError && <p className="text-xs text-red-500">{extractError}</p>}
-                <button onClick={runExtract} disabled={extracting || !extractText.trim()} className="px-3.5 py-2 rounded-xl text-xs font-semibold disabled:opacity-50" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)", color: "var(--text-main)" }}>
+                {extractError && <p role="alert" className="text-xs" style={{ color: "var(--p-bad)" }}>{extractError}</p>}
+                <button onClick={runExtract} disabled={extracting || !extractText.trim()} className="p-btn">
                   {extracting ? "Extracting…" : "Extract"}
                 </button>
               </div>
             </div>
 
-            <div className="rounded-2xl p-5" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}>
+            <div className="p-surface p-4 sm:p-5 min-w-0">
               <h3 className="text-sm font-bold mb-3">Entity detail</h3>
               {!selectedEntity ? (
                 <EmptyState text="Select an entity to see its relationships." />
@@ -488,7 +452,7 @@ export default function WorkspacePage() {
                       <EmptyState text="No relationships recorded yet." />
                     ) : (
                       selectedEntity.relationships.map((r) => (
-                        <div key={r.relationship_id} className="p-2.5 rounded-lg text-xs" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
+                        <div key={r.relationship_id} className="p-inset p-2.5 text-xs">
                           <span className="font-semibold">{r.relationship_type}</span>
                           {r.valid_from && <span style={{ color: "var(--text-subtle)" }}> · since {r.valid_from}</span>}
                           {r.valid_until && <span style={{ color: "var(--text-subtle)" }}> until {r.valid_until}</span>}
@@ -504,11 +468,12 @@ export default function WorkspacePage() {
 
         {tab === "agents" && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <div className="rounded-2xl p-5" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}>
+            <div className="p-surface p-4 sm:p-5 min-w-0">
               <h3 className="text-sm font-bold mb-3 flex items-center gap-2"><Bot className="w-4 h-4" /> Agent Registry</h3>
-              <div className="space-y-2">
-                {agents.map((a) => (
-                  <div key={a.agent_id} className="p-3 rounded-xl" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
+              <div className="space-y-2 p-stagger">
+                {!firstLoad && agents.length === 0 && <EmptyState text="No agents are registered on this server." />}
+                {agents.map((a, i) => (
+                  <div key={a.agent_id} style={{ ["--i" as string]: Math.min(i, 10) }} className="p-inset p-3">
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-semibold">{a.name}</span>
                       <RiskBadge level={a.risk_level} />
@@ -519,15 +484,16 @@ export default function WorkspacePage() {
               </div>
             </div>
 
-            <div className="rounded-2xl p-5" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}>
+            <div className="p-surface p-4 sm:p-5 min-w-0">
               <h3 className="text-sm font-bold mb-3 flex items-center gap-2"><Cpu className="w-4 h-4" /> Model Registry</h3>
-              <div className="space-y-2">
-                {models.map((m) => (
-                  <div key={m.model_id} className="p-3 rounded-xl" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
+              <div className="space-y-2 p-stagger">
+                {!firstLoad && models.length === 0 && <EmptyState text="No models are registered on this server." />}
+                {models.map((m, i) => (
+                  <div key={m.model_id} style={{ ["--i" as string]: Math.min(i, 10) }} className="p-inset p-3">
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-semibold font-mono">{m.model_id}</span>
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${m.enabled ? "text-emerald-500" : "text-slate-400"}`}>
-                        {m.enabled ? "ENABLED" : "DISABLED"}
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full `}>
+                        {m.enabled ? "Enabled" : "Disabled"}
                       </span>
                     </div>
                     <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
@@ -542,7 +508,7 @@ export default function WorkspacePage() {
 
         {tab === "team" && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <div className="rounded-2xl p-5 space-y-4" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}>
+            <div className="p-surface p-4 sm:p-5 space-y-4 min-w-0">
               <h3 className="text-sm font-bold flex items-center gap-2"><Users className="w-4 h-4" /> Usage & Quotas</h3>
               {usage && (
                 <div className="space-y-3">
@@ -561,10 +527,9 @@ export default function WorkspacePage() {
                     <input
                       value={renameValue}
                       onChange={(e) => setRenameValue(e.target.value)}
-                      className="flex-1 px-3 py-2 rounded-xl text-sm outline-none"
-                      style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)", color: "var(--text-main)" }}
+                      className="p-field flex-1 px-3 py-2 rounded-xl text-sm"
                     />
-                    <button onClick={saveTenantName} disabled={renameSaving} className="px-3.5 py-2 rounded-xl text-xs font-semibold" style={{ background: "var(--primary-gradient)", color: "var(--btn-text)" }}>
+                    <button onClick={saveTenantName} disabled={renameSaving} className="p-btn p-btn-primary">
                       {renameSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}
                     </button>
                   </div>
@@ -575,7 +540,7 @@ export default function WorkspacePage() {
               )}
             </div>
 
-            <div className="rounded-2xl p-5 space-y-4" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}>
+            <div className="p-surface p-4 sm:p-5 space-y-4 min-w-0">
               <h3 className="text-sm font-bold flex items-center gap-2"><Users className="w-4 h-4" /> Members</h3>
               {user?.role !== "admin" ? (
                 <EmptyState text="Only an admin of this organization can view and manage members." />
@@ -583,7 +548,7 @@ export default function WorkspacePage() {
                 <>
                   <div className="space-y-1.5 max-h-56 overflow-y-auto">
                     {members.map((m) => (
-                      <div key={m.id} className="flex items-center justify-between p-2.5 rounded-lg text-xs" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
+                      <div key={m.id} className="p-inset flex items-center justify-between gap-2 p-2.5 text-xs">
                         <span className="font-mono">{m.email}</span>
                         <span className="text-[10px] font-bold uppercase" style={{ color: "var(--text-subtle)" }}>{m.role}</span>
                       </div>
@@ -599,19 +564,17 @@ export default function WorkspacePage() {
                       value={newMemberEmail}
                       onChange={(e) => setNewMemberEmail(e.target.value)}
                       placeholder="teammate@yourorg.com"
-                      className="w-full px-3 py-2 rounded-xl text-xs outline-none"
-                      style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)", color: "var(--text-main)" }}
+                      className="p-field w-full px-3 py-2 rounded-xl text-xs"
                     />
                     <input
                       value={newMemberPassword}
                       onChange={(e) => setNewMemberPassword(e.target.value)}
                       type="password"
                       placeholder="Temporary password (min 8 chars)"
-                      className="w-full px-3 py-2 rounded-xl text-xs outline-none"
-                      style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)", color: "var(--text-main)" }}
+                      className="p-field w-full px-3 py-2 rounded-xl text-xs"
                     />
-                    {memberError && <p className="text-xs text-red-500">{memberError}</p>}
-                    <button onClick={addMember} disabled={addingMember} className="px-3.5 py-2 rounded-xl text-xs font-semibold disabled:opacity-50" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)", color: "var(--text-main)" }}>
+                    {memberError && <p role="alert" className="text-xs" style={{ color: "var(--p-bad)" }}>{memberError}</p>}
+                    <button onClick={addMember} disabled={addingMember} className="p-btn">
                       {addingMember ? "Adding…" : "Add member"}
                     </button>
                   </div>
@@ -620,34 +583,14 @@ export default function WorkspacePage() {
             </div>
           </div>
         )}
-      </div>
-    </div>
+        </div>
+    </PageShell>
   );
-}
-
-function StatCard({ icon: Icon, label, value }: { icon: React.ElementType; label: string; value: number }) {
-  return (
-    <div className="rounded-2xl p-5" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)" }}>
-      <div className="flex justify-between items-start mb-2">
-        <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>{label}</span>
-        <Icon className="w-4 h-4" style={{ color: "var(--primary-accent)" }} />
-      </div>
-      <div className="text-3xl font-bold">{value}</div>
-    </div>
-  );
-}
-
-function EmptyState({ text }: { text: string }) {
-  return <p className="text-xs italic py-4 text-center" style={{ color: "var(--text-subtle)" }}>{text}</p>;
 }
 
 function RiskBadge({ level }: { level: string }) {
-  const colors: Record<string, string> = { low: "text-emerald-500", medium: "text-amber-500", high: "text-red-500" };
-  return (
-    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${colors[level] || "text-slate-400"}`}>
-      {level}
-    </span>
-  );
+  const colors: Record<string, string> = { low: "var(--p-ok)", medium: "var(--p-warn)", high: "var(--p-bad)" };
+  return <span className="text-[11px] font-semibold capitalize" style={{ color: colors[level] || "var(--text-subtle)" }}>{level} risk</span>;
 }
 
 function QuotaBar({ label, used, max }: { label: string; used: number; max: number }) {
@@ -657,11 +600,9 @@ function QuotaBar({ label, used, max }: { label: string; used: number; max: numb
     <div className="space-y-1">
       <div className="flex justify-between text-xs font-medium">
         <span style={{ color: "var(--text-main)" }}>{label}</span>
-        <span className="font-mono" style={{ color: nearLimit ? "#ef4444" : "var(--text-subtle)" }}>{used} / {max}</span>
+        <span className="font-mono" style={{ color: nearLimit ? "var(--p-bad)" : "var(--text-subtle)" }}>{used} / {max}</span>
       </div>
-      <div className="h-2 w-full rounded-full overflow-hidden" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
-        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: nearLimit ? "#ef4444" : "var(--primary-accent)" }} />
-      </div>
+      <Meter label={label + " quota"} pct={pct} color={nearLimit ? "var(--p-bad)" : "var(--primary-accent)"} />
     </div>
   );
 }

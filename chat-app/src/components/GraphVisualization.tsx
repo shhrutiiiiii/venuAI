@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useMemo } from "react";
+import "@/app/motion-pages.css";
 
 export interface GraphEntity {
   entity_id: string;
@@ -87,15 +88,15 @@ export default function GraphVisualization({ center, relationships, relatedEntit
 
   if (neighborIds.length === 0) {
     return (
-      <div className="flex items-center justify-center h-64 text-xs italic" style={{ color: "var(--text-subtle)" }}>
-        No relationships to visualize yet.
+      <div className="flex items-center justify-center h-40 text-xs text-center px-4" style={{ color: "var(--text-muted)" }}>
+        This entity has no recorded relationships yet, so there is nothing to draw.
       </div>
     );
   }
 
   return (
-    <svg viewBox={`0 0 ${SIZE} ${SIZE}`} className="w-full h-auto max-h-[380px]" role="img" aria-label={`Knowledge graph neighborhood of ${center.name}`}>
-      {relationships.map((r) => {
+    <svg key={center.entity_id} viewBox={`0 0 ${SIZE} ${SIZE}`} className="w-full h-auto max-h-[380px]" role="img" aria-label={`Knowledge graph neighborhood of ${center.name}`}>
+      {relationships.map((r, ri) => {
         const otherId = r.source_entity_id === center.entity_id ? r.target_entity_id : r.source_entity_id;
         const p1 = positions.get(center.entity_id)!;
         const p2 = positions.get(otherId);
@@ -103,36 +104,47 @@ export default function GraphVisualization({ center, relationships, relatedEntit
         const midX = (p1.x + p2.x) / 2;
         const midY = (p1.y + p2.y) / 2;
         return (
-          <g key={r.relationship_id}>
-            <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="var(--border-subtle)" strokeWidth={1.5} />
-            <text x={midX} y={midY - 4} textAnchor="middle" fontSize={8} fill="var(--text-subtle)" style={{ paintOrder: "stroke", stroke: "var(--bg-card)", strokeWidth: 3 }}>
+          <g key={r.relationship_id} className="p-fade-in" style={{ animationDelay: `${ri * 50}ms` }}>
+            <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="var(--border-hover)" strokeWidth={1.25} />
+            <text x={midX} y={midY - 4} textAnchor="middle" fontSize={8} fill="var(--text-muted)" style={{ paintOrder: "stroke", stroke: "var(--bg-card)", strokeWidth: 3 }}>
               {r.relationship_type}
             </text>
           </g>
         );
       })}
 
-      {neighborIds.map((id) => {
+      {neighborIds.map((id, ni) => {
         const entity = byId.get(id);
         const pos = positions.get(id);
         if (!entity || !pos) return null;
         const color = TYPE_COLORS[entity.entity_type] || "#64748b";
         return (
-          <g key={id} onClick={() => onNodeClick(id)} className="cursor-pointer" style={{ cursor: "pointer" }}>
-            <circle cx={pos.x} cy={pos.y} r={NODE_R} fill={color} opacity={0.85} />
+          <g
+            key={id}
+            role="button"
+            tabIndex={0}
+            aria-label={`Open ${entity.name} (${entity.entity_type})`}
+            onClick={() => onNodeClick(id)}
+            onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); onNodeClick(id); } }}
+            className="p-node p-pop"
+            style={{ ["--i" as string]: ni + 1 }}
+          >
+            <title>{entity.name}</title>
+            <circle className="p-ring" cx={pos.x} cy={pos.y} r={NODE_R + 3} fill="none" stroke="transparent" />
+            <circle className="p-disc" cx={pos.x} cy={pos.y} r={NODE_R} fill={color} opacity={0.88} />
             <text x={pos.x} y={pos.y + 1} textAnchor="middle" dominantBaseline="middle" fontSize={8} fontWeight={700} fill="#fff">
-              {entity.name.slice(0, 10)}
+              {entity.name.length > 10 ? entity.name.slice(0, 9) + "…" : entity.name}
             </text>
-            <text x={pos.x} y={pos.y + NODE_R + 11} textAnchor="middle" fontSize={7} fill="var(--text-subtle)">
+            <text x={pos.x} y={pos.y + NODE_R + 11} textAnchor="middle" fontSize={7.5} fill="var(--text-muted)">
               {entity.entity_type}
             </text>
           </g>
         );
       })}
 
-      <circle cx={CENTER} cy={CENTER} r={CENTER_NODE_R} fill={TYPE_COLORS[center.entity_type] || "#64748b"} stroke="var(--bg-card)" strokeWidth={3} />
+      <circle className="p-fade-in" cx={CENTER} cy={CENTER} r={CENTER_NODE_R} fill={TYPE_COLORS[center.entity_type] || "#64748b"} stroke="var(--bg-card)" strokeWidth={3} />
       <text x={CENTER} y={CENTER + 1} textAnchor="middle" dominantBaseline="middle" fontSize={9} fontWeight={800} fill="#fff">
-        {center.name.slice(0, 12)}
+        {center.name.length > 12 ? center.name.slice(0, 11) + "…" : center.name}
       </text>
     </svg>
   );
