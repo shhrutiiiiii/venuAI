@@ -72,3 +72,6 @@ Each call pays real container-startup cost (image pull is a one-time cost via `e
 
 ## Notes for Developers
 If you change the Docker run flags, re-run `test_network_is_genuinely_disabled` and `test_infinite_loop_times_out_and_leaves_no_running_container` before assuming an isolation property still holds — both are *behavioral* tests of the actual container, not assertions on the command-line flags passed.
+
+## Hardening (S3)
+See ADR-S3.5 in `Documents/architecture-decisions.md`: capabilities dropped, non-root user, no swap/IPC/network, ulimits, per-user concurrency cap, byte-capped output reads, env-pinned image, no runtime pull.

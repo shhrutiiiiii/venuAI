@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authHeader } from "@/lib/serverAuthHeader";
+import { readJsonCapped } from "@/lib/requestLimits";
 
 const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const parsed = await readJsonCapped(req);
+    if (!parsed.ok) return parsed.res;
+    const body = parsed.body;
 
     // Forward all fields including new ones: session_id, user_id, agent_mode, multi_agent_mode
     const response = await fetch(`${RAG_SERVER}/query`, {

@@ -29,6 +29,10 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Request, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from VENUAI.request_limits import (
+    GraphText, History, Question, SessionId, ShortLabel, TopK, UserIdField, sanitized_validation_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -122,6 +126,7 @@ app.add_middleware(
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(RequestValidationError, sanitized_validation_handler)
 
 # ── Optional Wave B routers ──────────────────────────────────────────────────
 # Streams add endpoints by creating VENUAI/<name>.py exposing `router`
@@ -282,12 +287,12 @@ def save_metadata(meta: dict):
 
 # ── Pydantic Models ────────────────────────────────────────────────────────────
 class QueryRequest(BaseModel):
-    question: str
-    top_k: int = 4
-    history: Optional[List[dict]] = None
+    question: Question
+    top_k: TopK = 4
+    history: History = None
     # New fields — all have defaults for backward compatibility
-    session_id: str = "default-session"
-    user_id: Optional[str] = None
+    session_id: SessionId = "default-session"
+    user_id: Optional[UserIdField] = None
     agent_mode: bool = False        # ReAct agentic loop
     multi_agent_mode: bool = False  # specialist multi-agent routing
 
@@ -704,7 +709,7 @@ async def upload_document(
 
     # Validates size, extension, and actual file content (magic bytes) —
     # never trusts the client-supplied filename/extension alone.
-    content = await validate_upload(file)
+    content = await validate_upload(file, request.headers.get("content-length"))
 
     doc_id = str(uuid.uuid4())
     safe_name = generate_storage_name(file.filename)
@@ -718,11 +723,16 @@ async def upload_document(
 
     # Parse PDF
     try:
+        from VENUAI.upload_security import run_with_timeout
         loader = PyPDFLoader(str(save_path))
-        raw_pages = loader.load()
+        raw_pages = run_with_timeout(loader.load, float(os.getenv("PDF_PARSE_TIMEOUT_SECONDS", "60")))
+    except HTTPException:
+        save_path.unlink(missing_ok=True)
+        raise
     except Exception as e:
         save_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail=f"Failed to parse PDF: {str(e)}")
+        logger.warning("PDF parse failed: %s", e)
+        raise HTTPException(status_code=422, detail="Failed to parse PDF.")
 
     num_pages = len(raw_pages)
 
@@ -1714,7 +1724,7 @@ async def query_stream(
 
 
 class ResearchRequest(BaseModel):
-    question: str
+    question: Question
     extract_graph: bool = False
 
 
@@ -1947,7 +1957,7 @@ async def upload_multimodal_document(
     this is a separate document record from the /upload RAG pipeline.
     """
     _enforce_document_quota(current_user)
-    content = await validate_upload(file)  # same magic-byte/size validation as /upload
+    content = await validate_upload(file, request.headers.get("content-length"))  # same magic-byte/size validation as /upload
 
     doc_id = str(uuid.uuid4())
     safe_name = generate_storage_name(file.filename)
@@ -1971,7 +1981,8 @@ async def upload_multimodal_document(
         raise
     except Exception as e:
         save_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail=f"Failed to process PDF for multimodal extraction: {e}")
+        logger.warning("multimodal extraction failed: %s", e)
+        raise HTTPException(status_code=422, detail="Failed to process PDF for multimodal extraction.")
 
     summary = mm_doc.to_summary_dict()
     from datetime import datetime
@@ -2010,7 +2021,7 @@ def get_document_regions(doc_id: str, current_user: AuthenticatedUser = Depends(
 
 
 class RegionQuestionRequest(BaseModel):
-    question: str
+    question: Question
 
 
 class RegionQuestionResponse(BaseModel):
@@ -2071,8 +2082,8 @@ def ask_about_region(
 
 
 class RegionSearchRequest(BaseModel):
-    query: str
-    top_k: int = 5
+    query: Question
+    top_k: TopK = 5
 
 
 class RegionSearchResultOut(BaseModel):
@@ -2135,7 +2146,7 @@ class DatasetInfo(BaseModel):
 
 
 class DatasetAnalyzeRequest(BaseModel):
-    question: str
+    question: Question
 
 
 class DatasetAnalyzeResponse(BaseModel):
@@ -2168,7 +2179,7 @@ async def upload_dataset(
     from VENUAI.dataset_security import validate_and_parse_dataset, sanitize_filename, generate_storage_name
 
     _enforce_dataset_quota(current_user)
-    content, df, ext = await validate_and_parse_dataset(file)
+    content, df, ext = await validate_and_parse_dataset(file, request.headers.get("content-length"))
 
     dataset_id = str(uuid.uuid4())
     safe_name = generate_storage_name(file.filename, ext)
@@ -2296,8 +2307,8 @@ def analyze_dataset(
 # owner_id/classification rule as documents/datasets/multimodal regions.
 
 class GraphExtractRequest(BaseModel):
-    text: str
-    document_name: str = "Manual input"
+    text: GraphText
+    document_name: ShortLabel = "Manual input"
     use_llm: bool = True
 
 

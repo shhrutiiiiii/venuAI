@@ -142,6 +142,12 @@ def resolve_upload_path(file_path: str):
         return None, "Only PDF files are supported."
     if cand.stat().st_size > MAX_UPLOAD_BYTES:
         return None, "File too large (25 MB limit)."
+    try:
+        with open(cand, "rb") as fh:
+            if fh.read(5) != b"%PDF-":
+                return None, "File content is not a PDF."
+    except OSError:
+        return None, "File not found in the upload directory."
     return cand, None
 
 
@@ -234,7 +240,8 @@ def search_drdo_knowledge_base(query: str, top_k: int = 5) -> str:
         p = current_principal()
         return _search_kb(query, max(1, min(int(top_k), 20)), allowed_doc_ids=_visible_doc_ids(p))
     except Exception as e:
-        return f"Search failed: {str(e)}"
+        logger.warning("MCP search failed: %s", e)
+        return "Search failed. See server logs."
 
 
 @mcp.tool()
@@ -284,7 +291,8 @@ def upload_document(file_path: str) -> str:
             f"**Pages:** {result['pages']} | **Chunks:** {result['chunks']}"
         )
     except Exception as e:
-        return f"Upload failed: {str(e)}"
+        logger.warning("MCP upload failed: %s", e)
+        return "Upload failed. See server logs."
 
 
 @mcp.tool()
@@ -333,7 +341,8 @@ def query_with_rag(question: str, session_id: str = "") -> str:
             f"📚 **Sources:**\n{sources_md or 'Preloaded knowledge base.'}"
         )
     except Exception as e:
-        return f"RAG query failed: {str(e)}\n\nEnsure rag_server.py is running on port 8000."
+        logger.warning("MCP RAG query failed: %s", e)
+        return "RAG query failed. Ensure the VenuAI backend is running; see server logs."
 
 
 # ── Prompts ──────────────────────────────────────────────────────────────────────
