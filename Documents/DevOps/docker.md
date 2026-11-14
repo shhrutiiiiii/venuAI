@@ -73,3 +73,14 @@ Not yet measured under load — these images have been verified to build and pas
 
 ## Notes for Developers
 This document previously described a proposed, unbuilt shape — it was updated the same session the Dockerfiles were written, per the rule in `Agent.md` against letting documents drift from reality.
+
+
+## Hardening update (S5, supply chain and containers)
+- `VENUAI/Dockerfile` is multi-stage: a `builder` (with build-essential) installs `VENUAI/requirements.lock` into `/opt/venv` using `pip install --require-hashes`; the `runtime` stage copies only the venv, has no compiler, runs as UID 10001 under `tini`, and starts uvicorn with `--proxy-headers --forwarded-allow-ips ${FORWARDED_ALLOW_IPS}` and `--workers ${UVICORN_WORKERS}`. Writable state lives only under `data/`, `chroma_db/`, `uploaded_docs/` and `uploaded_datasets/` (volumes); `doc_metadata.json` and `datasets.json` are symlinked into `data/`, so the root filesystem can be read-only.
+- `chat-app/Dockerfile` uses Node 22, UID 10001, `tini`, `NEXT_TELEMETRY_DISABLED=1`, and a healthcheck on `/api/rag/health`. It uses `.next/standalone/server.js` when `output: "standalone"` is configured (S4 owns `next.config.ts`) and falls back to `next start` otherwise.
+- `docker-compose.yml` is the **dev** file: ports bound to `127.0.0.1`, backend on `:8000` for debugging, postgres opt-in with no default password (`POSTGRES_PASSWORD` is required for it to start).
+- `docker-compose.prod.yml` is the **prod** file: only the Caddy TLS proxy (`deploy/Caddyfile`, HSTS, body limit, SSE-friendly) publishes 80/443; backend, frontend and postgres are on an `internal` network with no host ports; `read_only`, `cap_drop: [ALL]`, `no-new-privileges`, `pids_limit`, `mem_limit`, `cpus`; secrets come from `.env.prod` / `BACKEND_ENV_FILE` (see `.env.prod.example`); `ENABLE_CODE_EXECUTION=false` and the container runtime socket is never mounted. `scripts/security/check_compose.sh` enforces this policy in CI.
+- `.dockerignore` (root and `chat-app/`) keeps `.env*`, databases, uploads and `.git` out of build contexts.
+- Base images are tag-pinned; `scripts/security/pin_images.sh` prints digest-pinned references to paste in. The torch wheel from PyPI is large (CUDA); switch to the CPU index in a separate lock if image size matters.
+- The voice prototype packages (pyaudio, pyttsx3, SpeechRecognition, pywin32) moved to `VENUAI/requirements-voice.txt`: they are only used by `main.py` and cannot build in a slim image.
+- Not verified here: the Docker daemon was not available, so images were not built or run; `docker compose config` was validated and CI (`security.yml`) builds and scans them.

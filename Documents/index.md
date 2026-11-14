@@ -20,6 +20,7 @@ A user uploads a PDF into the knowledge base, then asks questions in a chat UI. 
 | Backend | [`Backend/architecture.md`](Backend/architecture.md) | FastAPI server, LangGraph workflow, RAG pipeline, guardrails, memory, verification |
 | Database | [`Database/architecture.md`](Database/architecture.md) | ChromaDB vector store, SQLite audit log, JSON metadata/analytics stores |
 | Frontend | [`Frontend/architecture.md`](Frontend/architecture.md) | Next.js chat UI: streaming chat, verification panel, analytics dashboard, auth pages |
+| DevOps (security) | [`DevOps/security-checklist.md`](DevOps/security-checklist.md) | Supply chain, CI scanning, container hardening, secrets, OWASP mapping |
 | DevOps | [`DevOps/deployment.md`](DevOps/deployment.md) | Current (manual, local-only) run model and what's missing for real deployment |
 | AI | [`AI/index.md`](AI/index.md) | Multi-agent orchestration, prompts, LangGraph workflows, context engineering |
 | Evaluation | [`AI/evaluation.md`](AI/evaluation.md) | Real RAG eval harness: harvest/score, metrics, judge, datasets, CI gates |
