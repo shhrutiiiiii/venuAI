@@ -372,6 +372,11 @@ def _finish_trace(ctx: TurnCtx, result: dict) -> None:
             "verified": result.get("verified"), "grounding_score": result.get("grounding_score"),
             "corrective": result.get("corrective"), "latency_ms": result.get("latency_ms"),
             "usage": result.get("usage"),
+            "question": ctx.question,
+            "answer": result.get("answer"),
+            "context_chunks": [c.get("text") if isinstance(c, dict) else str(c)
+                               for c in (result.get("retrieved_chunks") or [])
+                               if (c.get("text") if isinstance(c, dict) else c)][:8] or None,
         })
     except Exception:  # noqa: BLE001
         pass

@@ -81,10 +81,19 @@ def _groq_chat(model: str, messages: List[dict], max_tokens: int, timeout: float
         raise RuntimeError("GROQ_API_KEY not configured")
     # central client helper; per-call short timeout and no retries for these guard calls
     client = get_groq_client().with_options(timeout=timeout, max_retries=0)
+    kwargs = {}
+    if "gpt-oss" in model:
+        # reasoning models spend max_tokens on hidden reasoning first; keep it short so the JSON
+        # verdict is not truncated away (finish_reason=length with empty content)
+        kwargs["reasoning_effort"] = "low"
     res = client.chat.completions.create(
-        model=model, messages=messages, max_tokens=max_tokens, temperature=0.0,
+        model=model, messages=messages, max_tokens=max_tokens, temperature=0.0, **kwargs,
     )
-    return (res.choices[0].message.content or "").strip()
+    msg = res.choices[0].message
+    content = (msg.content or "").strip()
+    if not content and getattr(res.choices[0], "finish_reason", None) == "length":
+        raise RuntimeError("classifier output truncated (finish_reason=length)")
+    return content
 
 
 def _parse_guard_output(raw: str) -> Optional[float]:
@@ -204,7 +213,7 @@ def safeguard_classify(text: str) -> dict:
             "safeguard",
             [{"role": "system", "content": SAFEGUARD_POLICY},
              {"role": "user", "content": text[:6000]}],
-            400, timeout,
+            int(os.getenv("SAFEGUARD_MAX_TOKENS", "1500")), timeout,
         )
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         data = json.loads(m.group(0)) if m else None

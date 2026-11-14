@@ -126,6 +126,30 @@ def warm_models() -> None:
         logger.warning(f"[warmup] reranker: {e}")
 
 
+def claim_level_grounding(pr, token_f1: float) -> tuple:
+    """Claim-level grounding = share of the answer's claims that the evidence supports.
+    Preference: NLI/HHEM supported_fraction (local_faithfulness, when measured) > citation-agent
+    claim support (SUPPORTED=1, PARTIALLY_SUPPORTED=0.5, else 0; needs >=1 claim) > the legacy
+    whole-sentence token-F1 (which under-scores correct paraphrases). Returns (score, basis).
+    Never fabricates: with no signal the legacy number is returned unchanged."""
+    try:
+        lf = getattr(pr, "local_faithfulness", None)
+        if lf and lf.get("score") is not None and lf.get("supported_fraction") is not None and lf.get("claims"):
+            return float(lf["supported_fraction"]), f"nli_claims:{lf.get('model')}"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from VENUAI.evidence import SupportStatus
+        claims = pr.evidence_graph.claims
+        if claims:
+            pts = sum(1.0 if c.support_status == SupportStatus.SUPPORTED
+                      else 0.5 if c.support_status == SupportStatus.PARTIALLY_SUPPORTED else 0.0 for c in claims)
+            return round(pts / len(claims), 4), "claim_overlap"
+    except Exception:  # noqa: BLE001
+        pass
+    return token_f1, "token_f1"
+
+
 def run_verification(answer: str, question: str, docs: List[Document], light: bool = False,
                      with_safety: bool = False) -> dict:
     """
@@ -185,6 +209,9 @@ def run_verification(answer: str, question: str, docs: List[Document], light: bo
             else:
                 from VENUAI import evidence_store
                 pr = f_pipe.result()
+                grounding, basis = claim_level_grounding(pr, grounding)
+                out["grounding_score"] = grounding
+                out["grounding_basis"] = basis
                 out.update({
                     "evidence_coverage": pr.evidence_graph.evidence_coverage,
                     "unsupported_claim_count": pr.critique.unsupported_claim_count,
