@@ -393,7 +393,7 @@ def test_query_500_does_not_leak_exception_text(client, auth_headers, monkeypatc
         pytest.skip("graph object is immutable in this langgraph version")
     assert r.status_code == 500
     assert "hunter2" not in r.text and "secret" not in r.text
-    assert "trace ID" in r.json()["detail"] and r.headers.get("x-trace-id")
+    assert r.json().get("request_id")
 
 
 # ── Demo seeding ─────────────────────────────────────────────────────────────

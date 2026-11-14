@@ -56,13 +56,17 @@ def test_tenant_usage_reports_real_counts(client):
 
 
 def test_non_admin_cannot_update_tenant_settings(client):
-    _, headers = _register_and_login(client, "member@rename.com", "Str0ng-Test-Pw-123", organization_name="Rename Co")
-    # The org creator is the tenant's first member but gets role "user" by
-    # default (create_user's role param isn't set from organization_name) —
-    # only the seeded demo admin or an explicitly admin-created account has
-    # the admin role, so this request must be rejected.
+    # Implicit personal workspace (no organization_name) stays a plain user.
+    _, headers = _register_and_login(client, "member@rename.com", "Str0ng-Test-Pw-123")
     r = client.patch("/tenants", json={"name": "New Name"}, headers=headers)
     assert r.status_code == 403
+
+
+def test_org_creator_is_tenant_admin(client):
+    # Integration (S1+S2): whoever explicitly creates an organisation administers it.
+    _, headers = _register_and_login(client, "owner@rename.com", "Str0ng-Test-Pw-123", organization_name="Rename Co")
+    r = client.patch("/tenants", json={"name": "New Name"}, headers=headers)
+    assert r.status_code == 200
 
 
 def test_admin_can_rename_and_requota_tenant(client):

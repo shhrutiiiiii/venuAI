@@ -33,6 +33,9 @@ os.environ.setdefault("SAFEGUARD_ENABLED", "false")
 # Code execution is off by default in production (policy_engine.code_execution_enabled);
 # the policy/sandbox tests exercise the admin path, test_sec_idor.py covers the default-off gate.
 os.environ.setdefault("ENABLE_CODE_EXECUTION", "1")
+# Never read/write the developer's real answer cache during tests (stale entries mask the pipeline).
+import tempfile as _tf
+os.environ.setdefault("SEMANTIC_CACHE_DB", os.path.join(_tf.mkdtemp(prefix="venuai-test-cache-"), "semantic_cache.db"))
 
 
 def pytest_configure(config):

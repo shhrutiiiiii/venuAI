@@ -1394,7 +1394,9 @@ def _agent_extras(ctx, mode_tools: List[str]) -> dict:
             pending = approvals.pop_pending(ctx.user.id)
     except Exception as err:  # noqa: BLE001
         logger.debug(f"approvals.pop_pending unavailable: {err}")
-    return {"pending_approval": pending}
+    if isinstance(pending, list):  # approvals.pop_pending may return a list; the API field is a single dict
+        pending = pending[0] if pending else None
+    return {"pending_approval": pending or None}
 
 
 def _react_messages_usage(messages) -> tuple:

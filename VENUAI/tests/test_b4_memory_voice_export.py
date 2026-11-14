@@ -119,7 +119,7 @@ def test_voice_disabled_returns_503(client, monkeypatch):
     h = _login(client, "v1@org-a.com", "VOrg A")
     assert client.get("/voice/status", headers=h).json() == {"stt": False, "tts": False}
     r = client.post("/voice/transcribe", files={"audio": ("a.wav", _wav(), "audio/wav")}, headers=h)
-    assert r.status_code == 503 and r.json() == {"detail": "voice disabled"}
+    assert r.status_code == 503 and r.json()["detail"] == "voice disabled"
     assert client.post("/voice/speak", json={"text": "hi"}, headers=h).status_code == 503
     assert client.post("/voice/speak", json={"text": "hi"}).status_code == 401
 

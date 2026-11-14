@@ -226,7 +226,7 @@ def auth_headers(client):
 def test_oversized_question_422_and_not_echoed(client, auth_headers):
     big = "A" * (10 * 1024 * 1024)
     r = client.post("/query", json={"question": big}, headers=auth_headers)
-    assert r.status_code == 422
+    assert r.status_code in (413, 422)  # 413 from the S4 body cap, 422 from S3 field bounds
     assert "AAAA" not in r.text
 
 
