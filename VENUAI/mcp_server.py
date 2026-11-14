@@ -142,6 +142,12 @@ def resolve_upload_path(file_path: str):
         return None, "Only PDF files are supported."
     if cand.stat().st_size > MAX_UPLOAD_BYTES:
         return None, "File too large (25 MB limit)."
+    try:
+        with open(cand, "rb") as fh:
+            if fh.read(5) != b"%PDF-":
+                return None, "File content is not a PDF."
+    except OSError:
+        return None, "File not found in the upload directory."
     return cand, None
 
 

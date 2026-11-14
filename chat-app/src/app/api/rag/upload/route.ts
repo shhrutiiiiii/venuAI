@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authHeader } from "@/lib/serverAuthHeader";
+import { MAX_PDF_UPLOAD_BYTES, rejectOversize } from "@/lib/requestLimits";
 
 const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
 
 export async function POST(req: NextRequest) {
   try {
+    const tooBig = rejectOversize(req, MAX_PDF_UPLOAD_BYTES);
+    if (tooBig) return tooBig;
     const formData = await req.formData();
     const response = await fetch(`${RAG_SERVER}/upload`, {
       method: "POST",

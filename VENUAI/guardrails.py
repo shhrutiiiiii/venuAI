@@ -13,15 +13,19 @@ Multi-layered security & safety guardrail engine enforcing:
      - Tracks all security triggers to SQLite audit store
 """
 
+import base64
+import binascii
 import json
 import logging
 import re
 import sqlite3
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from VENUAI.output_sanitizer import neutralise_markdown
 from VENUAI.pii_redaction import redact, redact_identifiers
 
 logger = logging.getLogger("drdo-rag")
@@ -57,11 +61,41 @@ class PromptInjectionDetector:
         r"act\s+as\s+an\s+unrestricted",
     ]
 
+    _ZERO_WIDTH_RE = re.compile("[​-‏‪-‮⁠-⁤﻿­]")
+    _B64_RE = re.compile(r"[A-Za-z0-9+/]{24,}={0,2}")
+    _HEX_RE = re.compile(r"(?:[0-9a-fA-F]{2}){12,}")
+
+    @classmethod
+    def normalise(cls, text: str) -> str:
+        """NFKC (folds full-width/compat forms) + zero-width/bidi/soft-hyphen removal."""
+        t = unicodedata.normalize("NFKC", text or "")
+        t = cls._ZERO_WIDTH_RE.sub("", t)
+        return t.lower()
+
+    @classmethod
+    def _decoded_variants(cls, text: str) -> List[str]:
+        """Second pass: base64 / hex blobs decoded to text so encoded payloads are scanned too."""
+        out: List[str] = []
+        for m in cls._B64_RE.findall(text)[:20]:
+            try:
+                out.append(base64.b64decode(m + "=" * (-len(m) % 4), validate=False).decode("utf-8", "ignore"))
+            except (binascii.Error, ValueError):
+                pass
+        for m in cls._HEX_RE.findall(text)[:20]:
+            try:
+                out.append(bytes.fromhex(m).decode("utf-8", "ignore"))
+            except ValueError:
+                pass
+        return out
+
     def check(self, text: str) -> Tuple[bool, Optional[str]]:
-        lowered = text.lower()
-        for pattern in self.INJECTION_PATTERNS:
-            if re.search(pattern, lowered):
-                return False, f"Prompt injection / security bypass detected (pattern matched: '{pattern}')"
+        base = unicodedata.normalize("NFKC", text or "")
+        spaced = self._ZERO_WIDTH_RE.sub(" ", base).lower()  # invisible char used in place of a space
+        candidates = [self.normalise(text), spaced] + [self.normalise(v) for v in self._decoded_variants(base)]
+        for lowered in candidates:
+            for pattern in self.INJECTION_PATTERNS:
+                if re.search(pattern, lowered):
+                    return False, f"Prompt injection / security bypass detected (pattern matched: '{pattern}')"
         return True, None
 
 
@@ -286,6 +320,10 @@ class GuardrailEngine:
             if pat.search(text):
                 text = pat.sub(repl, text)
                 violations.append(kind)
+        safe_md = neutralise_markdown(text)
+        if safe_md != text:
+            text = safe_md
+            violations.append("markdown_exfil")
         masked = redact_identifiers(text)
         if masked != text:
             text = masked

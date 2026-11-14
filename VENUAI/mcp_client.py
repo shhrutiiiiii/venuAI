@@ -35,12 +35,31 @@ import re
 import subprocess
 import threading
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("drdo-rag")
 
 PROTOCOL_VERSION = "2025-11-25"
 _ENV_RE = re.compile(r"\$\{([A-Z0-9_]+)\}")
+_SAFE_ENV_KEYS = ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "LANG", "TMPDIR", "APPDATA", "LOCALAPPDATA")
+ALLOWED_COMMANDS = {"npx", "node", "python", "python3", "uvx", "uv", "docker"}
+_PINNED_PKG_RE = re.compile(r"^(@[a-z0-9._-]+/)?[a-z0-9._-]+@\d+\.\d+\.\d+[A-Za-z0-9._-]*$")
+
+
+def validate_server_config(name: str, command: str, args: List[str]) -> None:
+    """Raise ValueError unless a stdio server config is allowed: command allowlist (basename only,
+    no path), and for npx/uvx a version-pinned package (no `@latest`, no unpinned names)."""
+    if not command:
+        return
+    base = os.path.basename(command)
+    cmd = base.lower().removesuffix(".exe")
+    if base != command or cmd not in ALLOWED_COMMANDS:
+        raise ValueError(f"command '{command}' is not allowed for MCP server '{name}'")
+    if cmd in ("npx", "uvx"):
+        pkgs = [a for a in args if not a.startswith("-")]
+        if not pkgs or not _PINNED_PKG_RE.match(pkgs[0].replace("==", "@")):
+            raise ValueError(f"MCP server '{name}': package must be pinned to an exact version (pkg@1.2.3)")
 
 
 def _expand(value: str) -> str:
@@ -72,6 +91,7 @@ class ExternalMCPClient:
         self._next_id = 0
         self._lock = threading.Lock()
         self._http = None
+        self._own_http = False
 
     @property
     def transport(self) -> str:
@@ -117,7 +137,19 @@ class ExternalMCPClient:
             if self.transport == "http":
                 import httpx
                 if self._http is None:
-                    self._http = httpx.Client(timeout=self.timeout)
+                    self._http = httpx.Client(timeout=self.timeout, follow_redirects=False, trust_env=False)
+                    self._own_http = True
+                if self._own_http:
+                    # SSRF guard: re-resolved on EVERY request (DNS rebinding); blocks private/metadata IPs.
+                    from VENUAI.net_safety import UnsafeURLError, validate_url
+                    try:
+                        if os.getenv("MCP_ALLOW_PRIVATE_URLS", "0") == "1":
+                            if urlsplit(self.url).scheme not in ("http", "https"):
+                                raise UnsafeURLError("URL scheme not allowed")
+                        else:
+                            validate_url(self.url)
+                    except UnsafeURLError as e:
+                        raise MCPError(f"MCP server URL rejected: {e}")
                 resp = self._http.post(self.url, json=msg, headers=self._http_headers())
                 if resp.status_code == 404 and self.session_id:
                     self._connected, self.session_id = False, None
@@ -167,7 +199,9 @@ class ExternalMCPClient:
             if self.transport == "stdio":
                 if not self.command:
                     raise MCPError("no command or url configured")
-                env = {**os.environ, **{k: _expand(v) for k, v in self.env.items()}}
+                # Minimal environment: never inherit the parent's secrets (GROQ key, JWT secret...).
+                env = {k: os.environ[k] for k in _SAFE_ENV_KEYS if k in os.environ}
+                env.update({k: _expand(v) for k, v in self.env.items()})
                 self.process = subprocess.Popen(
                     [self.command] + self.args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, text=True, env=env, bufsize=1)
@@ -254,13 +288,17 @@ class MCPClientManager:
             cfg = json.loads(path.read_text(encoding="utf-8"))
             for name, srv in cfg.get("mcpServers", {}).items():
                 if srv.get("command") or srv.get("url"):
-                    self.add_server(name, srv.get("command", ""), srv.get("args", []),
-                                    url=srv.get("url", ""), headers=srv.get("headers"), env=srv.get("env"))
+                    try:
+                        self.add_server(name, srv.get("command", ""), srv.get("args", []),
+                                        url=srv.get("url", ""), headers=srv.get("headers"), env=srv.get("env"))
+                    except ValueError as e:
+                        logger.warning("[MCPClientManager] server %s skipped: %s", name, e)
         except Exception as e:
             logger.warning("[MCPClientManager] Failed to read config %s: %s", path, e)
 
     def add_server(self, name: str, command: str = "", args: Optional[List[str]] = None, *,
                    url: str = "", headers: Optional[dict] = None, env: Optional[dict] = None):
+        validate_server_config(name, command, list(args or []))
         self.clients[name] = ExternalMCPClient(name, command, args, url=url, headers=headers, env=env)
 
     def register_discovered(self, server: str, client: Any, tdef: dict) -> str:

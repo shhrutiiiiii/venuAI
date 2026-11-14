@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authHeader } from "@/lib/serverAuthHeader";
+import { readJsonCapped } from "@/lib/requestLimits";
 
 const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
 
@@ -12,7 +13,9 @@ const UPSTREAM_TIMEOUT_MS = 170_000;
 /** Proxy to POST /research — multi-step deep research (plan, sub-questions, synthesis, verification). */
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const parsed = await readJsonCapped(req);
+    if (!parsed.ok) return parsed.res;
+    const body = parsed.body;
     const response = await fetch(`${RAG_SERVER}/research`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeader(req) },
