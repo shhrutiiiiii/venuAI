@@ -23,7 +23,6 @@ export function ResearchPlanEditor({
 
   const update = (i: number, text: string) => setItems((prev) => prev.map((q, idx) => (idx === i ? { ...q, text } : q)));
   const remove = (i: number) => setItems((prev) => prev.filter((_, idx) => idx !== i));
-  // eslint-disable-next-line react-hooks/purity
   const add = () => setItems((prev) => [...prev, { id: `user-${Date.now()}-${prev.length}`, text: "" }]);
 
   return (

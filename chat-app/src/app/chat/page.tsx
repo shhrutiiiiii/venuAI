@@ -1242,6 +1242,20 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                 >
                   Deep Research
                 </button>
+                {deepResearch && caps.research_jobs && (
+                  <select
+                    value={researchDepth}
+                    onChange={(e) => setResearchDepth(e.target.value as ResearchDepth)}
+                    aria-label="Research depth"
+                    className="px-2 py-1.5 rounded-xl text-xs font-semibold border bg-transparent"
+                    style={{ borderColor: "var(--border-subtle)", color: "var(--text-muted)" }}
+                  >
+                    <option value="quick">Quick</option>
+                    <option value="standard">Standard</option>
+                    <option value="deep">Deep</option>
+                  </select>
+                )}
+                {caps.memory && <MemoryButton />}
                 <AgentModeToggle mode={agentMode} onChange={setAgentMode} disabled={deepResearch} />
                 <button
                   type="button"
@@ -1394,8 +1408,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                               {caps.traces && msg.extras.trace_id && <TraceButton traceId={msg.extras.trace_id} />}
                               <SourceViewerButton chunks={msg.extras.retrieved_chunks} citations={msg.citations} />
                               {msg.extras.memories_used && msg.extras.memories_used.length > 0 && (
-                                <span className="text-[10px]" style={{ color: "var(--text-subtle)" }} title={msg.extras.memories_used.map((m) => m.text).join("
-")}>
+                                <span className="text-[10px]" style={{ color: "var(--text-subtle)" }} title={msg.extras.memories_used.map((m) => m.text).join(", ")}>
                                   used {msg.extras.memories_used.length} memor{msg.extras.memories_used.length === 1 ? "y" : "ies"}
                                 </span>
                               )}
@@ -1738,6 +1751,22 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                   className="flex-1 bg-transparent text-sm outline-none font-medium"
                   style={{ color: "var(--text-main)" }}
                 />
+                {ragDocuments.length > 0 && (
+                  <select
+                    value={scopeDocId}
+                    onChange={(e) => setScopeDocId(e.target.value)}
+                    aria-label="Ask this document"
+                    title="Limit answers to one document"
+                    className="max-w-[8rem] sm:max-w-[12rem] text-[11px] rounded-lg border bg-transparent px-1.5 py-1 truncate"
+                    style={{ borderColor: "var(--border-subtle)", color: "var(--text-muted)" }}
+                  >
+                    <option value="">All documents</option>
+                    {ragDocuments.map((d) => (
+                      <option key={d.id} value={d.id}>{d.filename}</option>
+                    ))}
+                  </select>
+                )}
+                <VoiceButton disabled={ragLoading} onTranscript={(t) => handleRagQuery(t)} />
                 <button
                   id="rag-send-btn"
                   type="button"
@@ -1851,6 +1880,15 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
         </div>
         )}
       </div>
+      {approval && caps.approvals && (
+        <ApprovalDialog
+          approval={approval.data}
+          busy={approval.busy}
+          error={approval.error}
+          onDecide={decideApproval}
+          onDismiss={() => setApproval(null)}
+        />
+      )}
     </div>
   );
 }
