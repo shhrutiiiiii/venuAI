@@ -429,7 +429,7 @@ def guarded_call(tool_id: str, args: dict, fn, *, user_id: str, tenant_id: str =
             ledger("ok", decision_label, appr.approver, (_time.perf_counter() - t0) * 1000)
             return text
         except TimeoutError:
-            last_err = "TimeoutError"
+            last_err = "the tool timed out"
             break                                   # a hung tool is not retried
         except Exception as e:
             logger.error("[tool %s] attempt %d failed: %s", tool_id, attempt, type(e).__name__, exc_info=e)

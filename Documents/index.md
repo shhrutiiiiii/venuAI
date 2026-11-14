@@ -30,7 +30,7 @@ A user uploads a PDF into the knowledge base, then asks questions in a chat UI. 
 3. **Guardrails run on input before any retrieval or generation happens.** Prompt-injection, out-of-scope, and PII checks gate the request at the top of `/query`, not after. See [`Backend/architecture.md`](Backend/architecture.md).
 4. **Fallback over failure.** If no documents have been uploaded, the system answers from a preloaded knowledge base rather than erroring. See [`AI/workflows.md`](AI/workflows.md).
 5. **Single backend entry point.** The Next.js frontend never talks to ChromaDB, SQLite, or Groq directly — only to the FastAPI `rag_server.py` (via Next.js API routes that proxy to it). See [`Frontend/architecture.md`](Frontend/architecture.md).
-6. **Known gaps are documented, not hidden.** Where the system is still unsafe for production (per-chunk retrieval authorization, dev cruft not yet removed), the relevant document says so plainly. See [`Backend/authentication.md`](Backend/authentication.md) and [`future-additions.md`](future-additions.md).
+6. **Known gaps are documented, not hidden.** Where the system is still unsafe for production (per-chunk retrieval authorization, dev cruft not yet removed), the relevant document says so plainly. See [`Backend/authentication.md`](Backend/authentication.md), [`Backend/http-security.md`](Backend/http-security.md) (headers, CORS, rate limits, error hygiene, production config) and [`future-additions.md`](future-additions.md).
 
 ## Architecture Review & Key Observations
 Non-obvious characteristics of the current system, each worth knowing before changing it:
