@@ -80,6 +80,15 @@ See ADR-001, ADR-003, ADR-005 — the three decisions with the most direct perfo
 **Decision:** (1) The registry lists only models verified against Groq `GET /openai/v1/models`: `openai/gpt-oss-120b` (primary), `openai/gpt-oss-20b` (fast), `qwen/qwen3.8-27b` (different family: second-opinion fallback and `JUDGE` capability for evals), `openai/gpt-oss-safeguard-20b` (`SAFETY`) and `meta-llama/llama-prompt-guard-2-86m` (`PROMPT_GUARD`); classifiers are never in a chat fallback chain. (2) Every Groq client is built in `ai_gateway/provider.py` (`get_groq_client`, `get_async_groq_client`, `get_chat_groq`) with `GROQ_TIMEOUT_SECONDS` (default 30) and SDK `max_retries=1`; the gateway owns retries. (3) `AIGateway.stream()/astream()` walk the same chain and circuit breaker, retrying/falling back only before the first chunk; telemetry records model, latency and time-to-first-token. (4) `model_used` and `/health` report the model that actually answered / the registry's configured chain. (5) gpt-oss models get a per-task `reasoning_effort` (low for classification, medium otherwise), reasoning text is excluded from content, and `max_tokens` is widened to leave room for reasoning tokens.
 **Consequence:** One place to correct a model id or timeout. The ReAct agent still needs a LangChain chat model, so it is built via the central helper on the router's first model but does not get gateway fallback; a mid-stream failure is surfaced to the client rather than silently retried. Supersedes the model-id remark in ADR-001.
 
+## ADR-B31: Deep Research v2 as persistent jobs
+**Decision:** research runs as SQLite-persisted jobs (plan -> editable plan -> parallel isolated sub-question agents -> synthesis -> separate citation pass with deterministic quote verification). Default depth `quick` (3 sub-questions, 40k tokens, 120 s); budget overruns return a flagged partial report (`budget_exceeded`). Jobs interrupted by restart are resumable. Legacy `POST /research` delegates via `research_jobs.run_research_sync`. See Documents/AI/deep-research.md.
+
+## ADR-B32: Opt-in long-term memory; working memory keyed by (tenant, user, session)
+**Decision:** long-term memory needs `LONG_TERM_MEMORY=on` AND a per-user opt-in; FAST-model extraction, PII-redacted, 300-char cap, deterministic ADD/UPDATE/NOOP by similarity. Security fix: working memory was keyed by session id only, and the API default session id "default-session" was shared by all users; it is now keyed by (tenant, user, session). See Documents/AI/memory.md.
+
+## ADR-B33: Voice and report export as env-gated / bounded routers
+**Decision:** voice is off unless `VOICE_ENABLED`, never stores audio, validates magic bytes/size/duration; export renders DOCX/PDF/MD from sanitized markdown (no HTML pass-through, 2 MB cap). See Documents/AI/voice.md.
+
 ## Future Improvements
 New ADRs should be appended here, never inserted out of order — each ADR number is permanent once written, even if a later decision supersedes it (supersession should be noted in the superseding ADR, not by editing the old one).
 

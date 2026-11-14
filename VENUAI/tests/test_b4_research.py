@@ -147,6 +147,7 @@ def test_token_budget_returns_partial_report_honestly(env, monkeypatch):
     mgr, _ = env
     monkeypatch.setitem(rj.DEPTHS, "quick", {"max_subquestions": 3, "max_tokens": 5000, "max_seconds": 120})
     monkeypatch.setattr(rj, "llm_complete", FakeLLM(tokens_per_call=600))
+    monkeypatch.setattr(rj, "MAX_PARALLEL", 1)
     jid = _job(mgr, _subs("a?", "b?", "c?"))
     # budget_for() is read at job creation, so create after patching
     mgr.runner.run(jid)
