@@ -177,6 +177,12 @@ def test_research_persists_an_evidence_record(client, auth_headers, monkeypatch)
         "VENUAI.verification_pipeline.get_verification_pipeline", lambda: _FakeVerificationPipeline(),
     )
 
+    # /research prefers the B4 job engine (no claim-level evidence); this test covers the legacy
+    # DeepResearchAgent path that still feeds the evidence store, so force the ImportError fallback.
+    def _no_v2(*a, **k):
+        raise ImportError("force legacy agent")
+    monkeypatch.setattr("VENUAI.research_jobs.run_research_sync", _no_v2)
+
     r = client.post("/research", json={"question": "What is the range of Agni-V?"}, headers=auth_headers)
     assert r.status_code == 200
 
