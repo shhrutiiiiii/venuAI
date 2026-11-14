@@ -1,3 +1,7 @@
+# DEVELOPMENT compose. Ports are published on localhost only; the backend is
+# reachable on :8000 for direct API debugging. For production use
+# docker-compose.prod.yml (nothing but the TLS proxy is published):
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 services:
   backend:
     build:
@@ -5,17 +9,20 @@ services:
       dockerfile: VENUAI/Dockerfile
     env_file:
       - VENUAI/.env
+    environment:
+      - APP_ENV=development
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - chroma_data:/app/VENUAI/chroma_db
       - uploaded_docs:/app/VENUAI/uploaded_docs
+      - uploaded_datasets:/app/VENUAI/uploaded_datasets
       - app_data:/app/VENUAI/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status==200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
       interval: 30s
       timeout: 5s
-      start_period: 20s
+      start_period: 60s
       retries: 3
 
   frontend:
@@ -26,30 +33,27 @@ services:
       - RAG_SERVER_URL=http://backend:8000
       - NODE_ENV=production
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       backend:
         condition: service_healthy
 
-  # Real PostgreSQL backend for the knowledge graph (Documents/AI/knowledge-graph.md).
-  # Opt-in via the "postgres" Compose profile — SQLite remains the
-  # zero-config default; this service only starts when explicitly
-  # requested: `docker compose --profile postgres up`. Also set
-  # KNOWLEDGE_GRAPH_BACKEND=postgres (and point PGHOST at this service's
-  # name, "postgres") in VENUAI/.env for the backend to actually use it.
+  # Optional PostgreSQL knowledge-graph backend: `docker compose --profile postgres up`.
+  # Credentials come from the environment (no defaults): set POSTGRES_PASSWORD in
+  # your shell or a compose .env file (empty = postgres refuses to start). Localhost only.
   postgres:
     image: postgres:16-alpine
     profiles: ["postgres"]
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=${POSTGRES_USER:-venuai}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
       - POSTGRES_DB=venuai_graph
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -57,5 +61,6 @@ services:
 volumes:
   chroma_data:
   uploaded_docs:
+  uploaded_datasets:
   app_data:
   postgres_data:

@@ -1,0 +1,23 @@
+# TLS reverse proxy for docker-compose.prod.yml. Automatic HTTPS via Let's Encrypt.
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
+		-Server
+	}
+
+	# Body limit: must exceed the largest allowed upload (see backend upload limits).
+	request_body {
+		max_size 60MB
+	}
+
+	reverse_proxy frontend:3000 {
+		# Buffering off so SSE chat streaming is not held back.
+		flush_interval -1
+	}
+}

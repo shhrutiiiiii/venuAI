@@ -1,0 +1,129 @@
+# PRODUCTION compose. Only the TLS reverse proxy publishes ports. The backend and
+# postgres live on the internal network with no host port. Secrets come from the
+# environment / an env file that is NOT in git:
+#   cp .env.prod.example .env.prod   # then fill in; python scripts/security/gen_secrets.py
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+# Validate with: scripts/security/check_compose.sh
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+  proxy:
+    image: caddy:2-alpine
+    <<: *hardening
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS:?set SITE_ADDRESS (public hostname)}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    tmpfs:
+      - /tmp
+    cap_add: [NET_BIND_SERVICE]
+    pids_limit: 128
+    mem_limit: 256m
+    networks: [edge, internal]
+    depends_on:
+      frontend:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./chat-app
+      dockerfile: Dockerfile
+    <<: *hardening
+    expose: ["3000"]
+    environment:
+      - RAG_SERVER_URL=http://backend:8000
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+    tmpfs:
+      - /tmp
+      - /app/.next/cache
+    pids_limit: 256
+    mem_limit: 512m
+    cpus: 1.0
+    networks: [internal]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  backend:
+    build:
+      context: .
+      dockerfile: VENUAI/Dockerfile
+    <<: *hardening
+    expose: ["8000"]            # NOT published on the host
+    env_file:
+      - ${BACKEND_ENV_FILE:-VENUAI/.env}
+    environment:
+      - APP_ENV=production
+      - SEED_DEMO_USER=false
+      - ALLOWED_ORIGINS=https://${SITE_ADDRESS:?set SITE_ADDRESS}
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-*}   # only the internal network can reach us
+      - UVICORN_WORKERS=${UVICORN_WORKERS:-2}
+      - LOG_FORMAT=json
+      - ENABLE_CODE_EXECUTION=false   # never expose the container runtime socket; use a dedicated sandbox runner if needed
+    volumes:
+      - chroma_data:/app/VENUAI/chroma_db
+      - uploaded_docs:/app/VENUAI/uploaded_docs
+      - uploaded_datasets:/app/VENUAI/uploaded_datasets
+      - app_data:/app/VENUAI/data
+    tmpfs:
+      - /tmp
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: 2.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    # `edge` gives outbound internet (Groq API); it has no published ports.
+    networks: [internal, edge]
+
+  # Optional knowledge-graph database: `--profile postgres`. Never published.
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    <<: *hardening
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-venuai}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - POSTGRES_DB=venuai_graph
+    cap_add: [CHOWN, SETUID, SETGID, FOWNER, DAC_OVERRIDE]
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    pids_limit: 256
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+
+networks:
+  edge:
+  internal:
+    internal: true   # no route to the internet
+
+volumes:
+  chroma_data:
+  uploaded_docs:
+  uploaded_datasets:
+  app_data:
+  postgres_data:
+  caddy_data:
+  caddy_config:

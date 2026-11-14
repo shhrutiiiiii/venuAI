@@ -1,0 +1,25 @@
+title = "VenuAI gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "groq-api-key"
+description = "Groq API key"
+regex = '''gsk_[A-Za-z0-9]{40,}'''
+tags = ["key", "groq"]
+
+[allowlist]
+description = "Fake credentials used by tests and docs"
+paths = [
+  '''VENUAI/tests/''',
+  '''Documents/''',
+  '''chat-app/package-lock.json''',
+  '''VENUAI/requirements\.lock''',
+  '''\.env\.example$''',
+]
+regexes = [
+  '''ci-only-secret-never-used-outside-ci-runners''',
+  '''ci-placeholder-not-a-real-key''',
+  '''test-only-secret-[0-9a-f]+-not-for-prod''',
+]
