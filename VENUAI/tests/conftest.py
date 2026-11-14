@@ -25,6 +25,8 @@ os.environ["CONTEXTUAL_CHUNKING"] = "false"
 os.environ.setdefault("GROQ_MODEL", "openai/gpt-oss-120b")
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-7f3a9c2e1b8d4f6a-not-for-prod")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
+# Fast bcrypt for the suite only (production enforces >= 12).
+os.environ.setdefault("BCRYPT_ROUNDS", "4")
 # Model-based safety classifiers make network calls; tests opt in explicitly with mocks.
 os.environ.setdefault("PROMPT_GUARD_ENABLED", "false")
 os.environ.setdefault("SAFEGUARD_ENABLED", "false")
@@ -64,6 +66,14 @@ def _reset_rate_limiter():
     limiter.reset()
     yield
     limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_security_audit_db(monkeypatch, tmp_path):
+    """security_audit.log() writes an append-only DB; never touch the real one."""
+    from VENUAI import security_audit
+    monkeypatch.setattr(security_audit, "DB_PATH", tmp_path / "security_audit_test.db")
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -132,6 +142,10 @@ def isolated_auth_db(monkeypatch, tmp_path):
     monkeypatch.setattr(auth, "DB_PATH", db_path)
     auth.init_db()
     auth.seed_demo_users()
+    # seed_demo_users() never creates an admin (by design); tests that need
+    # one get a fixed throwaway admin in this isolated DB only.
+    if auth.get_user_by_email("admin@chat.com") is None:
+        auth.create_user("admin@chat.com", "admin12345", role="admin")
     yield auth
 
 

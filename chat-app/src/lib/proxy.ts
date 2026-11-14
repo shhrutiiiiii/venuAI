@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authHeader } from "@/lib/serverAuthHeader";
 import { upstreamErrorResponse } from "@/lib/proxyErrors";
+import { forwardHeaders } from "@/lib/forwardHeaders";
 
 const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
 
@@ -24,7 +25,7 @@ interface ProxyOptions {
  */
 export async function proxyToBackend(req: NextRequest, path: string, opts: ProxyOptions = {}): Promise<Response> {
   const method = opts.method ?? req.method;
-  const headers: Record<string, string> = { ...authHeader(req) };
+  const headers: Record<string, string> = { ...authHeader(req), ...forwardHeaders(req) };
   let body: ArrayBuffer | undefined;
   if (opts.withBody) {
     const ct = req.headers.get("content-type");
@@ -59,7 +60,7 @@ export async function proxyToBackend(req: NextRequest, path: string, opts: Proxy
 export async function proxySse(req: NextRequest, path: string): Promise<Response> {
   try {
     const res = await fetch(`${RAG_SERVER}${path}`, {
-      headers: { Accept: "text/event-stream", ...authHeader(req) },
+      headers: { Accept: "text/event-stream", ...authHeader(req), ...forwardHeaders(req) },
       cache: "no-store",
       signal: req.signal,
     });

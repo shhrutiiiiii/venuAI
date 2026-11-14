@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { csrfViolation } from "@/lib/csrf";
 
 /**
  * Per-request response headers (Next 16 "proxy", formerly middleware).
@@ -31,6 +32,10 @@ export function buildCsp(isDev: boolean): string {
 }
 
 export function proxy(req: NextRequest) {
+  // S1 (ADR-S1.6): CSRF check on every state-changing /api request.
+  if (req.nextUrl.pathname.startsWith("/api/") && csrfViolation(req.method, req.headers, req.nextUrl.host)) {
+    return NextResponse.json({ detail: "Request blocked." }, { status: 403 });
+  }
   const res = NextResponse.next();
   const isDev = process.env.NODE_ENV !== "production";
   const header = process.env.CSP_ENFORCE === "1" ? "Content-Security-Policy" : "Content-Security-Policy-Report-Only";

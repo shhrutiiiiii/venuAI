@@ -88,3 +88,19 @@ bcrypt hashing is deliberately slow (by design, to resist brute force) — this 
 
 ## Notes for Developers
 `mockAuth.ts` has been deleted — do not re-add client-side mock credential checks. Real auth logic lives entirely in `VENUAI/auth.py`; the frontend (`src/lib/authClient.ts`) only calls it. The "Sign in with Google/GitHub" buttons on the login page are pre-existing UI that call the same demo-credential autofill as the "DRDO Scientist"/"Lab Director" buttons — they are not real OAuth and should not be presented as such until item 2 above is done.
+
+## Security hardening (S1) — current behaviour
+
+This section supersedes any older statement above that conflicts with it.
+
+- **Secret:** `JWT_SECRET_KEY` must be >= 32 bytes and not a placeholder, or the server refuses to boot. Access tokens (HS256, derived per-purpose key) carry `iss`, `aud`, `jti`, `tv`, `type`; all are verified, `alg=none`/other algorithms are rejected.
+- **Sessions:** refresh tokens form families with atomic rotation and reuse detection (replay revokes the family; a 5 s grace, `REFRESH_REUSE_GRACE_SECONDS`, tolerates two tabs racing). `users.token_version` (`tv`) kills access tokens on logout, `POST /auth/logout-all`, password reset and `auth.set_user_role`.
+- **Login:** uniform 401 for unknown/wrong/locked, dummy bcrypt for unknown accounts, lockout checked first and never extended, exponential backoff, bcrypt cost 12 (`BCRYPT_ROUNDS`) with rehash-on-login.
+- **Passwords (signup/reset):** >= 12 chars, <= 72 bytes, not common/repetitive, not the email name. Login still accepts legacy passwords.
+- **Registration:** personal tenant by default; joining a tenant requires `invite_token` (`auth.create_invite`, single use, hashed, 7 days, optionally email-bound). A bare `tenant_id` returns 403.
+- **Seeding:** `SEED_DEMO_USER` seeds only `demo@chat.com` (dev only, refused in production). No admin is seeded: `python -m VENUAI.auth create-admin --email ...` or `BOOTSTRAP_ADMIN_EMAIL/PASSWORD` once.
+- **Frontend:** refresh cookie `SameSite=Strict`, path `/api/auth`; access cookie `Lax`, path `/`. `src/proxy.ts` enforces same-origin + `X-Requested-With: venuai` on unsafe `/api/*` requests. `/api/auth/me` now also refreshes when only the refresh cookie remains.
+- **Client IP:** Next forwards `X-Forwarded-For` + `X-VenuAI-Proxy-Secret`; `VENUAI/client_ip.trusted_client_ip(request)` honours it only with the matching `TRUSTED_PROXY_SECRET`.
+- **Audit:** `security_events` (append-only): login_ok/failed, login_blocked_locked, account_locked, refresh_reuse_detected, reset_requested/used/rejected, oauth_*, register*, role_change, logout(_all).
+- **Tests:** `VENUAI/tests/test_sec_auth_core.py`, `test_oauth.py`, `test_oauth_endpoints.py`.
+

@@ -11,11 +11,11 @@ from VENUAI import memory_extractor, memory_manager as mmod, report_export, simp
 
 
 def _login(client, email, org=None):
-    body = {"email": email, "password": "password123"}
+    body = {"email": email, "password": "Str0ng-Test-Pw-123"}
     if org:
         body["organization_name"] = org
     assert client.post("/auth/register", json=body).status_code == 201
-    tok = client.post("/auth/login", json={"email": email, "password": "password123"}).json()["access_token"]
+    tok = client.post("/auth/login", json={"email": email, "password": "Str0ng-Test-Pw-123"}).json()["access_token"]
     return {"Authorization": f"Bearer {tok}"}
 
 

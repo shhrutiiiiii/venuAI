@@ -120,9 +120,12 @@ def test_forgot_password_for_unknown_email_returns_202_without_revealing(client)
     assert r.status_code == 202
 
 
-def test_forgot_password_for_real_email_without_smtp_configured_returns_503(client):
+def test_forgot_password_without_smtp_is_still_a_uniform_202(client):
+    # No account-existence (or config) oracle: same 202 as an unknown email;
+    # the misconfiguration is logged server-side only.
     r = client.post("/auth/forgot-password", json={"email": "demo@chat.com"})
-    assert r.status_code == 503
+    assert r.status_code == 202
+    assert r.json() == client.post("/auth/forgot-password", json={"email": "ghost@example.com"}).json()
 
 
 def test_forgot_password_sends_real_looking_email_when_configured(client, monkeypatch):

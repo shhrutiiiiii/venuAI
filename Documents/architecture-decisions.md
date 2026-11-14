@@ -117,6 +117,29 @@ See ADR-001, ADR-003, ADR-005 — the three decisions with the most direct perfo
 **Context:** no per-request or per-tenant limit existed; small LLM helpers parsed free text; clients could not see how an answer was made.
 **Decision:** a contextvar `UsageMeter` records provider-reported tokens for every gateway call (null / `complete:false` when unreported, never estimated). `REQUEST_TOKEN_BUDGET` stops further calls (`BudgetExceeded`), `TENANT_DAILY_TOKEN_BUDGET` (SQLite counter) downshifts to the 20b model at 80% and refuses with HTTP 429 at 100%. Small helpers use `response_format=json_schema` via `structured.complete_json` (the provider retries plain when a model rejects it; parsing is repair-tolerant). /query and the stream done event gain `retrieved_chunks, usage, ttft_ms, latency_ms, cache_hit, model_path, followups, contradictions, corrective, trace_id, memories_used, pending_approval`; /query/stream emits typed `{"step": ...}` events. Follow-ups ride the generation call (`<followups>` tail) and cost an extra fast-model call only when the tail is missing.
 **Consequence:** additive API; clients that ignore unknown fields/steps keep working.
+## ADR-S1.1: Refresh-token families, token_version, single-use reset tokens
+**Decision:** every refresh token belongs to a family; rotation is one `BEGIN IMMEDIATE` transaction (exactly one concurrent caller wins). Replaying an already-rotated token (outside a 5 s benign-race grace) revokes the whole family and is audited. `users.token_version` is embedded as the `tv` claim and checked on every request; it is bumped by logout, logout-all, password reset and role change, so access tokens die immediately instead of at expiry. Reset tokens are random 32 bytes, stored hashed, 15 min, single use, bound to the current password hash, and a newer token voids older ones.
+**Consequence:** one extra column read per request (the user row is already loaded). Access tokens minted before this change are rejected once (users re-login).
+
+## ADR-S1.2: Uniform authentication failures and lockout
+**Decision:** unknown email, wrong password and locked account return the identical 401 and each cost one bcrypt verify; lockout is checked before the password, is not extended while active, and escalates exponentially (5 min doubling, 1 h cap). `forgot-password` always returns 202 and does its work in a background task (so timing and SMTP failures leak nothing). The locked state is therefore invisible to the client (UX cost accepted for no enumeration oracle).
+
+## ADR-S1.3: Registration cannot join an existing tenant without an invite
+**Decision:** self-registration creates a personal tenant (or one named by `organization_name`); `tenant_id` is only honoured together with a valid single-use `invite_token` from `tenant_invites` (hashed, expiring, optionally email-bound). Password policy (>= 12 chars, <= 72 bytes, not common, not the email name) applies to signup and reset only; login keeps the legacy minimum so existing accounts still work.
+**Consequence:** the old "join default tenant by default" behaviour is gone; S2 owns the admin route that calls `auth.create_invite`.
+
+## ADR-S1.4: OAuth hardening
+**Decision:** state is random, stored hashed server-side, single-use, bound to the browser through an httpOnly `venuai_oauth_binding` cookie, with PKCE S256 (the verifier never leaves the server). `redirect_uri` must match an allow-list. Only provider-verified emails count (Google `verified_email`; GitHub primary+verified from `/user/emails`). Identities are keyed on `(provider, sub)`. An existing password account is never auto-linked by email (409); an authenticated "connect" flow is not built. New OAuth users get a personal tenant.
+
+## ADR-S1.5: Demo and admin seeding
+**Decision:** `SEED_DEMO_USER` (default on only outside production) seeds one demo user, never an admin; production always refuses it. First admin via `python -m VENUAI.auth create-admin` or one-time `BOOTSTRAP_ADMIN_EMAIL/PASSWORD`. The login demo box needs `NEXT_PUBLIC_SHOW_DEMO=true`.
+
+## ADR-S1.6: CSRF and proxy trust on the Next side
+**Decision:** `src/proxy.ts` rejects (403) every unsafe `/api/*` request that is not same-origin (Sec-Fetch-Site / Origin) or lacks `X-Requested-With: venuai`; a global fetch wrapper installed from AuthContext adds the header. The refresh cookie is `SameSite=Strict` and scoped to `/api/auth`. Proxies forward the client IP (`X-Forwarded-For`, nth entry from the right per `TRUSTED_PROXY_HOPS`) plus `X-VenuAI-Proxy-Secret`; the backend trusts the header only with that secret (`VENUAI/client_ip.py`, for S4's rate-limit key).
+**Consequence:** any non-browser caller of the Next API must send the header and a same-origin marker.
+
+## ADR-S1.7: Append-only security audit log
+**Decision:** `VENUAI/security_audit.py` writes `security_events` (SQLite triggers abort UPDATE/DELETE); `log(event, user_id, tenant_id, ip, detail)` never raises and never receives secrets.
 
 ## Future Improvements
 New ADRs should be appended here, never inserted out of order — each ADR number is permanent once written, even if a later decision supersedes it (supersession should be noted in the superseding ADR, not by editing the old one).

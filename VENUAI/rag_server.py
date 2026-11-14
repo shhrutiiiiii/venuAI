@@ -365,35 +365,13 @@ class DocumentInfo(BaseModel):
 
 
 # ── Auth Routes ────────────────────────────────────────────────────────────────
-# Real, server-side authentication. Replaces the previous frontend-only mock
-# (chat-app/src/lib/mockAuth.ts) — see Documents/Backend/authentication.md.
-
-@app.post("/auth/register", response_model=auth.UserOut, status_code=201)
-@limiter.limit("5/minute")
-def register(request: Request, body: auth.RegisterRequest):
-    return auth.create_user(
-        body.email, body.password,
-        tenant_id=body.tenant_id or "default",
-        organization_name=body.organization_name,
-    )
+# Real, server-side authentication — see Documents/Backend/authentication.md.
+# Logic lives in VENUAI/auth.py, oauth.py, email_service.py; handlers are thin.
+from VENUAI.client_ip import trusted_client_ip  # noqa: E402
+from VENUAI import security_audit  # noqa: E402
 
 
-@app.post("/auth/login", response_model=auth.TokenResponse)
-@limiter.limit("10/minute")
-def login(request: Request, body: auth.LoginRequest):
-    user_row = auth.get_user_by_email(body.email)
-    if user_row is None or not auth.verify_password(body.password, user_row["hashed_password"]):
-        if user_row is not None:
-            auth.record_failed_login(body.email)
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
-    if auth.is_locked(user_row):
-        raise HTTPException(
-            status_code=423,
-            detail="Account temporarily locked due to repeated failed login attempts. Try again later.",
-        )
-    auth.reset_failed_login(body.email)
-    access = auth.create_access_token(user_row["id"], user_row["role"])
-    refresh = auth.issue_refresh_token(user_row["id"])
+def _token_response(user_row, access: str, refresh: str) -> auth.TokenResponse:
     return auth.TokenResponse(
         access_token=access,
         refresh_token=refresh,
@@ -401,46 +379,76 @@ def login(request: Request, body: auth.LoginRequest):
     )
 
 
-@app.post("/auth/refresh", response_model=auth.TokenResponse)
-@limiter.limit("20/minute")
-def refresh_token(request: Request, body: auth.RefreshRequest):
-    new_access, new_refresh = auth.rotate_refresh_token(body.refresh_token)
-    payload = auth.decode_access_token(new_access)
-    user_row = auth.get_user_by_id(payload["sub"])
-    return auth.TokenResponse(
-        access_token=new_access,
-        refresh_token=new_refresh,
-        user=auth.UserOut(id=user_row["id"], email=user_row["email"], role=user_row["role"], tenant_id=user_row["tenant_id"]),
+@app.post("/auth/register", response_model=auth.UserOut, status_code=201)
+@limiter.limit("5/minute")
+def register(request: Request, body: auth.RegisterRequest):
+    return auth.register_user(
+        body.email, body.password,
+        organization_name=body.organization_name,
+        tenant_id=body.tenant_id,
+        invite_token=body.invite_token,
+        ip=trusted_client_ip(request),
     )
 
 
+@app.post("/auth/login", response_model=auth.TokenResponse)
+@limiter.limit("10/minute")
+def login(request: Request, body: auth.LoginRequest):
+    # Unknown email / wrong password / locked account all raise the same 401.
+    user_row = auth.authenticate(body.email, body.password, ip=trusted_client_ip(request))
+    access = auth.create_access_token(user_row["id"], user_row["role"], user_row["token_version"])
+    refresh = auth.issue_refresh_token(user_row["id"])
+    return _token_response(user_row, access, refresh)
+
+
+@app.post("/auth/refresh", response_model=auth.TokenResponse)
+@limiter.limit("20/minute")
+def refresh_token(request: Request, body: auth.RefreshRequest):
+    new_access, new_refresh = auth.rotate_refresh_token(body.refresh_token, ip=trusted_client_ip(request))
+    payload = auth.decode_access_token(new_access)
+    return _token_response(auth.get_user_by_id(payload["sub"]), new_access, new_refresh)
+
+
 @app.post("/auth/logout", status_code=204)
-def logout(body: auth.RefreshRequest):
-    auth.revoke_refresh_token(body.refresh_token)
+@limiter.limit("30/minute")
+def logout(request: Request, body: auth.RefreshRequest):
+    """Revokes the whole refresh-token family and bumps token_version so the
+    session's access tokens die immediately, not at expiry."""
+    user_id = auth.revoke_refresh_token(body.refresh_token)
+    if user_id:
+        security_audit.log("logout", user_id, None, trusted_client_ip(request))
     return None
 
 
-# ── OAuth (Google / GitHub) — Phase 5 ────────────────────────────────────────
-# Real authorization-code-flow implementation (VENUAI/oauth.py) — genuinely
-# blocked for live use here only by missing real provider credentials, see
-# Documents/Backend/oauth.md. The Next.js frontend, not this backend, is
-# responsible for the browser redirect and for setting httpOnly cookies
-# from the tokens this returns — same division of responsibility as
-# /auth/login.
+@app.post("/auth/logout-all", status_code=204)
+@limiter.limit("10/minute")
+def logout_all(request: Request, current_user: AuthenticatedUser = Depends(get_current_user)):
+    auth.logout_all(current_user.id)
+    security_audit.log("logout_all", current_user.id, current_user.tenant_id, trusted_client_ip(request))
+    return None
+
+
+# ── OAuth (Google / GitHub) ──────────────────────────────────────────────────
+# Logic in VENUAI/oauth.py (PKCE, browser-bound single-use state, verified
+# email, sub-keyed identities). The Next.js routes own the browser redirect and
+# the httpOnly cookies (session + short-lived oauth binding).
 
 class OAuthAuthorizeResponse(BaseModel):
     authorize_url: str
+    binding: str
 
 
 @app.get("/auth/oauth/{provider}/login", response_model=OAuthAuthorizeResponse)
-def oauth_login(provider: str, redirect_uri: str):
-    """Returns the provider's real authorization URL for the frontend to
-    redirect the browser to. 503 if the provider isn't configured —
-    never a fabricated URL that can't actually complete."""
-    from VENUAI.oauth import OAuthNotConfiguredError, build_authorize_url
+@limiter.limit("20/minute")
+def oauth_login(request: Request, provider: str, redirect_uri: str):
+    """Returns the provider's authorization URL plus a `binding` secret the
+    frontend must keep in an httpOnly cookie and echo on callback. 503 if the
+    provider isn't configured — never a fabricated URL."""
+    from VENUAI.oauth import OAuthNotConfiguredError, begin_authorization
 
     try:
-        return OAuthAuthorizeResponse(authorize_url=build_authorize_url(provider, redirect_uri))
+        url, binding = begin_authorization(provider, redirect_uri)
+        return OAuthAuthorizeResponse(authorize_url=url, binding=binding)
     except OAuthNotConfiguredError as e:
         raise http_security.safe_error(e, "This sign-in provider is not configured.", 503)
     except ValueError as e:
@@ -451,26 +459,20 @@ class OAuthCallbackRequest(BaseModel):
     code: str
     state: str
     redirect_uri: str
+    binding: Optional[str] = None
 
 
 @app.post("/auth/oauth/{provider}/callback", response_model=auth.TokenResponse)
 @limiter.limit("10/minute")
 def oauth_callback(request: Request, provider: str, body: OAuthCallbackRequest):
-    """
-    Exchanges a real authorization code for a verified user identity,
-    then finds-or-creates a local account by email and issues the same
-    real JWT access/refresh token pair /auth/login does — an OAuth sign-in
-    is just a different way of establishing identity, not a different
-    session mechanism.
-    """
-    import secrets
-    from VENUAI.oauth import OAuthExchangeError, OAuthNotConfiguredError, exchange_code_for_user, verify_state
-
-    if not verify_state(body.state, expected_provider=provider):
-        raise HTTPException(status_code=400, detail="Invalid or expired OAuth state — possible CSRF, please try signing in again.")
+    from VENUAI.oauth import OAuthExchangeError, OAuthLoginError, OAuthNotConfiguredError, complete_login
 
     try:
-        profile = exchange_code_for_user(provider, body.code, body.redirect_uri)
+        user_row = complete_login(
+            provider, body.code, body.state, body.binding, body.redirect_uri, ip=trusted_client_ip(request)
+        )
+    except OAuthLoginError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
     except OAuthNotConfiguredError as e:
         raise http_security.safe_error(e, "This sign-in provider is not configured.", 503)
     except OAuthExchangeError as e:
@@ -478,87 +480,43 @@ def oauth_callback(request: Request, provider: str, body: OAuthCallbackRequest):
     except ValueError as e:
         raise http_security.safe_error(e, "Invalid sign-in request.", 400)
 
-    user_row = auth.get_user_by_email(profile["email"])
-    if user_row is None:
-        created = auth.create_user(profile["email"], secrets.token_urlsafe(32))
-        user_row = auth.get_user_by_email(created.email)
-
-    access_token = auth.create_access_token(user_row["id"], user_row["role"])
-    refresh_token = auth.issue_refresh_token(user_row["id"])
-    return auth.TokenResponse(
-        access_token=access_token, refresh_token=refresh_token,
-        user=auth.UserOut(id=user_row["id"], email=user_row["email"], role=user_row["role"], tenant_id=user_row["tenant_id"]),
-    )
+    access_token = auth.create_access_token(user_row["id"], user_row["role"], user_row["token_version"])
+    return _token_response(user_row, access_token, auth.issue_refresh_token(user_row["id"]))
 
 
-# ── Password reset (Phase 5) ─────────────────────────────────────────────────
-# Real SMTP delivery (VENUAI/email_service.py) — genuinely blocked for live
-# email delivery here only by missing real SMTP credentials, see
-# Documents/Backend/password-reset.md.
-
+# ── Password reset ───────────────────────────────────────────────────────────
 @app.post("/auth/forgot-password", status_code=202)
 @limiter.limit("5/minute")
-def forgot_password(request: Request, body: auth.ForgotPasswordRequest):
-    """
-    Always returns 202 regardless of whether the email belongs to a real
-    account — never confirms/denies account existence to the caller
-    (prevents email enumeration). If SMTP isn't configured, that's a real
-    server-side problem (503), not something to hide behind a fake
-    "sent" response — but it's still only raised *after* checking the
-    account exists, so an unconfigured-SMTP response itself doesn't leak
-    account existence either: both outcomes for a real account converge
-    on either "sent" or a 503 that reveals nothing about the account.
-    """
+def forgot_password(request: Request, body: auth.ForgotPasswordRequest, background_tasks: BackgroundTasks):
+    """Identical 202 for known, unknown and SMTP-failing cases; all real work
+    (lookup, token, send) runs after the response so timing matches too.
+    Failures are logged server-side only."""
     from VENUAI import email_service
 
-    user_row = auth.get_user_by_email(body.email)
-    if user_row is None:
-        return {"status": "accepted"}
-
-    if not email_service.is_configured():
-        raise HTTPException(
-            status_code=503,
-            detail="Password reset email delivery is not configured on this server. Contact an administrator.",
-        )
-
-    reset_token = auth.create_password_reset_token(user_row["id"])
-    reset_link = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/reset-password?token={reset_token}"
-    try:
-        email_service.send_email(
-            to=body.email,
-            subject="Reset your VenuAI password",
-            body_text=(
-                f"Someone requested a password reset for your VenuAI account.\n\n"
-                f"Reset your password: {reset_link}\n\n"
-                f"This link expires in 30 minutes. If you didn't request this, ignore this email."
-            ),
-        )
-    except email_service.EmailSendError as e:
-        logger.error(f"[forgot_password] Real SMTP send failed: {e}")
-        raise HTTPException(status_code=502, detail="Failed to send the password reset email. Please try again later.")
-
+    background_tasks.add_task(email_service.send_password_reset, body.email, trusted_client_ip(request))
     return {"status": "accepted"}
 
 
 @app.post("/auth/reset-password", status_code=200)
 @limiter.limit("10/minute")
 def reset_password(request: Request, body: auth.ResetPasswordRequest):
-    """Consumes the signed reset token exactly once in effect — not
-    literally single-use (no DB row to mark spent), but changing the
-    password revokes every refresh token, and the old password hash
-    (which the token doesn't encode) is gone, so replaying the same
-    token again just resets to whatever `new_password` is passed this
-    time, by the same legitimate caller who already proved email
-    ownership by receiving the link."""
+    """Single-use token bound to the current password hash: validates the new
+    password against the policy first (a weak password does not burn the
+    token), then atomically spends the token, then updates the password
+    (which kills every session)."""
+    invalid = HTTPException(status_code=400, detail="This password reset link is invalid or has expired.")
+    ip = trusted_client_ip(request)
     user_id = auth.verify_password_reset_token(body.token)
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="This password reset link is invalid or has expired.")
-
-    user_row = auth.get_user_by_id(user_id)
+    user_row = auth.get_user_by_id(user_id) if user_id else None
     if user_row is None:
-        raise HTTPException(status_code=400, detail="This password reset link is invalid or has expired.")
-
+        security_audit.log("reset_rejected", None, None, ip)
+        raise invalid
+    auth.enforce_password_policy(body.new_password, user_row["email"])
+    if auth.consume_password_reset_token(body.token) != user_id:
+        security_audit.log("reset_rejected", user_id, user_row["tenant_id"], ip)
+        raise invalid
     auth.update_password(user_id, body.new_password)
+    security_audit.log("reset_used", user_id, user_row["tenant_id"], ip)
     return {"status": "password_reset"}
 
 

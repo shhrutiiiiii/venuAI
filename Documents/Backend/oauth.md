@@ -75,3 +75,12 @@ Two sequential real HTTP calls per callback (token exchange, then userinfo — t
 
 ## Notes for Developers
 When real credentials are eventually added, do the rewiring in #2 above as its own small, separately-verifiable change — don't bundle it with unrelated work, since "does this actually sign a real user in through a real browser" is the one thing that can only be confirmed by someone who has the real `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` (or GitHub's equivalent) and a browser to click through it.
+
+## S1 hardening (supersedes the signed-JWT state described above)
+
+- `GET /auth/oauth/{provider}/login` returns `{authorize_url, binding}`. State is random, hashed in `oauth_states`, single use (10 min); PKCE S256, verifier stored server-side. The Next login route puts `binding` in an httpOnly cookie (`venuai_oauth_binding`, path `/api/auth/oauth`); the callback sends it back and the backend requires it to match, so a state planted into a victim's browser fails.
+- `redirect_uri` must be `<FRONTEND_URL | ALLOWED_ORIGINS | OAUTH_ALLOWED_ORIGINS origin>/api/auth/oauth/<provider>/callback`.
+- Only verified emails: Google `verified_email`/`email_verified`; GitHub primary + verified entry of `/user/emails` (the public profile email is ignored).
+- Accounts key on `oauth_identities(provider, sub)`. An existing password account with the same email is NOT linked (409, audited as `oauth_link_refused`); a signed-in "connect provider" action is future work. New users get a personal tenant.
+- Provider error bodies are logged server-side, not returned to the browser.
+

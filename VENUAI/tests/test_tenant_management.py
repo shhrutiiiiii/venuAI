@@ -44,7 +44,7 @@ def _register_and_login(client, email, password, organization_name=None, tenant_
 
 
 def test_tenant_usage_reports_real_counts(client):
-    _, headers = _register_and_login(client, "owner@usage.com", "password123", organization_name="Usage Co")
+    _, headers = _register_and_login(client, "owner@usage.com", "Str0ng-Test-Pw-123", organization_name="Usage Co")
 
     r = client.get("/tenants/usage", headers=headers)
     assert r.status_code == 200
@@ -56,7 +56,7 @@ def test_tenant_usage_reports_real_counts(client):
 
 
 def test_non_admin_cannot_update_tenant_settings(client):
-    _, headers = _register_and_login(client, "member@rename.com", "password123", organization_name="Rename Co")
+    _, headers = _register_and_login(client, "member@rename.com", "Str0ng-Test-Pw-123", organization_name="Rename Co")
     # The org creator is the tenant's first member but gets role "user" by
     # default (create_user's role param isn't set from organization_name) —
     # only the seeded demo admin or an explicitly admin-created account has
@@ -87,7 +87,7 @@ def test_admin_can_add_and_list_tenant_members(client):
     login = client.post("/auth/login", json={"email": "admin@chat.com", "password": "admin12345"})
     headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
 
-    r = client.post("/tenants/members", json={"email": "newmember@chat.com", "password": "password123"}, headers=headers)
+    r = client.post("/tenants/members", json={"email": "newmember@chat.com", "password": "Str0ng-Test-Pw-123"}, headers=headers)
     assert r.status_code == 201, r.text
     assert r.json()["tenant_id"] == "default"
 
@@ -99,8 +99,8 @@ def test_admin_can_add_and_list_tenant_members(client):
 
 
 def test_non_admin_cannot_add_tenant_members(client):
-    _, headers = _register_and_login(client, "notadmin@members.com", "password123")
-    r = client.post("/tenants/members", json={"email": "sneaky@test.com", "password": "password123"}, headers=headers)
+    _, headers = _register_and_login(client, "notadmin@members.com", "Str0ng-Test-Pw-123")
+    r = client.post("/tenants/members", json={"email": "sneaky@test.com", "password": "Str0ng-Test-Pw-123"}, headers=headers)
     assert r.status_code == 403
 
 
@@ -111,7 +111,7 @@ def test_adding_member_beyond_quota_is_rejected(client):
     # Shrink the quota to exactly current membership (demo + admin = 2).
     client.patch("/tenants", json={"max_users": 2}, headers=headers)
 
-    r = client.post("/tenants/members", json={"email": "overflow@chat.com", "password": "password123"}, headers=headers)
+    r = client.post("/tenants/members", json={"email": "overflow@chat.com", "password": "Str0ng-Test-Pw-123"}, headers=headers)
     assert r.status_code == 403
     assert "limit" in r.json()["detail"].lower()
 
@@ -120,10 +120,10 @@ def test_document_quota_blocks_further_uploads(client, monkeypatch):
     """Upload isn't exercised here (needs a real PDF + embedding model —
     see test_upload_graph_autopopulation.py) — this asserts the quota gate
     itself fires correctly against the real tenant-scoped document count."""
-    _, headers = _register_and_login(client, "quota@docs.com", "password123", organization_name="Doc Quota Co")
+    _, headers = _register_and_login(client, "quota@docs.com", "Str0ng-Test-Pw-123", organization_name="Doc Quota Co")
 
     tenant = client.get("/auth/tenant", headers=headers).json()
-    login = client.post("/auth/login", json={"email": "quota@docs.com", "password": "password123"})
+    login = client.post("/auth/login", json={"email": "quota@docs.com", "password": "Str0ng-Test-Pw-123"})
     # Promote isn't exposed via API; use the tenant's own PATCH as a non-admin
     # user is rejected, so directly shrink quota via the auth module for
     # this test's purposes (the org creator isn't auto-admin — see note above).
@@ -138,7 +138,7 @@ def test_document_quota_blocks_further_uploads(client, monkeypatch):
 
 
 def test_dataset_quota_blocks_further_uploads(client):
-    _, headers = _register_and_login(client, "quota@datasets.com", "password123", organization_name="Dataset Quota Co")
+    _, headers = _register_and_login(client, "quota@datasets.com", "Str0ng-Test-Pw-123", organization_name="Dataset Quota Co")
     tenant = client.get("/auth/tenant", headers=headers).json()
 
     from VENUAI import auth
@@ -152,14 +152,15 @@ def test_dataset_quota_blocks_further_uploads(client):
 
 
 def test_registering_into_a_full_tenant_is_rejected(client):
-    _, owner_headers = _register_and_login(client, "full@org.com", "password123", organization_name="Full Org")
+    _, owner_headers = _register_and_login(client, "full@org.com", "Str0ng-Test-Pw-123", organization_name="Full Org")
     tenant = client.get("/auth/tenant", headers=owner_headers).json()
 
     from VENUAI import auth
     auth.update_tenant(tenant["tenant_id"], max_users=1)  # already has 1 member (the creator)
 
+    invite = auth.create_invite(tenant["tenant_id"])
     r = client.post("/auth/register", json={
-        "email": "second@fullorg.com", "password": "password123", "tenant_id": tenant["tenant_id"],
+        "email": "second@fullorg.com", "password": "Str0ng-Test-Pw-123", "invite_token": invite,
     })
     assert r.status_code == 403
     assert "limit" in r.json()["detail"].lower()
