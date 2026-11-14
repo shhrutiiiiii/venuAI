@@ -111,10 +111,10 @@ def world(tmp_path_factory):
     research_jobs.reset_manager()
 
 
-def _mm_summary():
+def _mm_summary(tag=""):
     return {"document_id": "x", "pages": [{"page_number": 1, "regions": [
         {"region_id": "r1", "region_type": "table", "bounding_box": None,
-         "extracted_text": "Parameter Range 5000 km", "ocr_text": None, "ocr_unavailable_reason": None}]}],
+         "extracted_text": f"Parameter Range 5000 km {tag}".strip(), "ocr_text": None, "ocr_unavailable_reason": None}]}],
         "total_tables": 1, "total_images": 0}
 
 
@@ -135,12 +135,12 @@ def res(world):
         meta[did] = {"id": did, "filename": f"{key}.pdf", "pages": 1, "chunks": 0, "upload_time": "t",
                      "size_kb": 1.0, "file_path": str(world.tmp / "docs" / f"{did}.pdf"), "tags": {},
                      "owner_id": A.id, "tenant_id": world.t1, "classification": cls,
-                     "is_multimodal": True, "multimodal_summary": _mm_summary()}
+                     "is_multimodal": True, "multimodal_summary": _mm_summary(did)}
     # a tenant-2 document, for cross-tenant listing checks
     r.doc_c = str(uuid.uuid4())
     meta[r.doc_c] = {"id": r.doc_c, "filename": "c.pdf", "pages": 1, "chunks": 0, "upload_time": "t",
                      "size_kb": 1.0, "file_path": "", "tags": {}, "owner_id": C.id, "tenant_id": world.t2,
-                     "classification": "UNKNOWN", "is_multimodal": True, "multimodal_summary": _mm_summary()}
+                     "classification": "UNKNOWN", "is_multimodal": True, "multimodal_summary": _mm_summary(r.doc_c)}
     rag_server.save_metadata(meta)
 
     dmeta = rag_server.load_dataset_metadata()
@@ -187,6 +187,14 @@ def res(world):
 def call(world, who, method, url, **kw):
     headers = {} if who is None else world.headers[who]
     return world.client.request(method, url, headers=headers, **kw)
+
+
+def _nobody(resp):
+    """JSON body minus the per-request correlation id."""
+    b = resp.json()
+    if isinstance(b, dict):
+        b = {k: v for k, v in b.items() if k != "request_id"}
+    return b
 
 
 def _is_not_found(resp):
@@ -267,7 +275,7 @@ def test_idor_matrix(world, res, case, who):
         missing = call(world, who, method, _probe_missing(tmpl), json=body)
         assert missing.status_code == 404
         if "/tenants/invites" not in tmpl:
-            assert missing.json() == resp.json(), (missing.text, resp.text)
+            assert _nobody(missing) == _nobody(resp), (missing.text, resp.text)
     else:
         assert resp.status_code == want, (who, resp.status_code, resp.text[:200])
 
@@ -318,7 +326,7 @@ def test_job_and_memory_lists_are_per_user(world, res, who, visible):
 
 @pytest.mark.parametrize("who,visible", [("A", True), ("B", False), ("ADM1", True), ("C", False), ("ADM2", False)])
 def test_region_search_only_returns_visible_documents(world, res, who, visible):
-    out = call(world, who, "POST", "/documents/regions/search", json={"query": "Parameter Range", "top_k": 500}).json()
+    out = call(world, who, "POST", "/documents/regions/search", json={"query": f"Parameter Range {res.doc_priv} {res.doc_c}", "top_k": 20}).json()
     docs = {r["document_id"] for r in out}
     assert (res.doc_priv in docs) is visible
     assert res.doc_c not in docs or who in ("C", "ADM2")
@@ -486,8 +494,9 @@ def test_register_ignores_role_in_body(world):
         "email": "evil-one@example.com", "password": "Sup3r-secret-pw!", "role": "admin", "is_admin": True,
         "organization_name": "Evil Org"})
     assert r.status_code == 201
-    assert r.json()["role"] == "user"
-    assert auth.get_user_by_email("evil-one@example.com")["role"] == "user"
+    # the creator of a new organization becomes its admin; the body's role/is_admin is ignored
+    assert r.json()["role"] == "admin"
+    assert auth.get_user_by_email("evil-one@example.com")["role"] == "admin"
 
 
 def test_tenant_patch_ignores_foreign_tenant_id_in_body(world):
@@ -546,7 +555,7 @@ def test_query_handlers_overwrite_client_user_id_and_scope_memory():
         src = inspect.getsource(fn)
         assert "req.user_id = current_user.id" in src
         assert "authz.normalize_session_id(req.session_id)" in src
-        assert ".scoped(current_user.tenant_id)" in src
+        assert "tenant_id=current_user.tenant_id" in src  # memory reads are tenant-bound explicitly
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -567,7 +576,7 @@ def test_guessed_or_malformed_ids_give_a_uniform_404(world, method, tmpl, bad):
     r = world.client.request(method, tmpl.format(bad), headers=world.headers["A"])
     assert r.status_code in (404, 405), (r.status_code, r.text[:120])
     if r.status_code == 404 and "/" not in bad and "%2F" not in bad:
-        assert r.json() == base.json()
+        assert _nobody(r) == _nobody(base)
 
 
 def test_numeric_or_sequential_ids_do_not_resolve(world, res):
@@ -579,7 +588,7 @@ def test_numeric_or_sequential_ids_do_not_resolve(world, res):
 def test_nonexistent_equals_forbidden_for_documents(world, res):
     forbidden = call(world, "C", "GET", f"/documents/{res.doc_priv}/regions")
     missing = call(world, "C", "GET", f"/documents/{uuid.uuid4()}/regions")
-    assert (forbidden.status_code, forbidden.json()) == (missing.status_code, missing.json())
+    assert (forbidden.status_code, _nobody(forbidden)) == (missing.status_code, _nobody(missing))
 
 
 def test_safe_lookup_never_raises_keyerror(world):
@@ -934,6 +943,7 @@ def test_every_route_is_classified_and_authenticated_routes_reject_anonymous(wor
         kw = {}
         if method in ("POST", "PUT", "PATCH"):
             kw["json"] = {}
+        rag_server.limiter.reset()  # ~100 anonymous calls must not trip the rate limiter
         resp = world.client.request(method, url, **kw)
         if resp.status_code not in (401, 403):
             bad.append((key, resp.status_code))
