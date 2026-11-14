@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
-
-const ACCESS_COOKIE = "venuai_access_token";
+import { ACCESS_COOKIE } from "@/lib/authCookies";
 
 /**
  * Builds the Authorization header to forward to the FastAPI backend from

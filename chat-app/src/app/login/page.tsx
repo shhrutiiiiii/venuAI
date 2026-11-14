@@ -1,6 +1,7 @@
 "use client";
 
 import { Shield, CheckCircle2, Lock } from "lucide-react";
+import { Suspense } from "react";
 import LoginForm from "@/components/login/LoginForm";
 import ThemeToggle from "@/components/ThemeToggle";
 
@@ -138,7 +139,7 @@ export default function LoginPage() {
         </div>
 
         {/* Form component */}
-        <LoginForm />
+        <Suspense fallback={null}><LoginForm /></Suspense>
 
         {/* Terms footer */}
         <p className="mt-8 text-xs text-center max-w-xs leading-relaxed font-medium" style={{ color: "var(--text-subtle)" }}>

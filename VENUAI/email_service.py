@@ -66,3 +66,35 @@ def send_email(to: str, subject: str, body_text: str) -> None:
         raise EmailSendError(f"Failed to send email via {host}:{port}: {e}")
     except OSError as e:
         raise EmailSendError(f"Could not connect to SMTP server {host}:{port}: {e}")
+
+
+def send_password_reset(email: str, ip: str = None) -> None:
+    """Background job behind POST /auth/forgot-password. Never raises and never
+    signals to the HTTP caller whether the account exists or the send worked —
+    every outcome is logged server-side and audited instead."""
+    try:
+        from VENUAI import auth, security_audit
+
+        user_row = auth.get_user_by_email(email)
+        if user_row is None:
+            return
+        if not is_configured():
+            logger.warning("[forgot_password] SMTP is not configured; reset email NOT sent.")
+            return
+        token = auth.create_password_reset_token(user_row["id"])
+        link = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')}/reset-password?token={token}"
+        send_email(
+            to=email,
+            subject="Reset your VenuAI password",
+            body_text=(
+                "Someone requested a password reset for your VenuAI account.\n\n"
+                f"Reset your password: {link}\n\n"
+                f"This link works once and expires in {auth.PASSWORD_RESET_TTL_SECONDS // 60} minutes. "
+                "If you didn't request this, ignore this email."
+            ),
+        )
+        security_audit.log("reset_requested", user_row["id"], user_row["tenant_id"], ip)
+    except EmailSendError as e:
+        logger.error(f"[forgot_password] SMTP send failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[forgot_password] unexpected failure: {e}")

@@ -241,13 +241,13 @@ def test_plan_structured_parses_json_and_falls_back(monkeypatch):
 
 # ── HTTP layer ────────────────────────────────────────────────────────────────
 def _login(client, email, org=None, tenant_id=None):
-    body = {"email": email, "password": "password123"}
+    body = {"email": email, "password": "Str0ng-Test-Pw-123"}
     if org:
         body["organization_name"] = org
     if tenant_id:
         body["tenant_id"] = tenant_id
     assert client.post("/auth/register", json=body).status_code == 201
-    tok = client.post("/auth/login", json={"email": email, "password": "password123"}).json()["access_token"]
+    tok = client.post("/auth/login", json={"email": email, "password": "Str0ng-Test-Pw-123"}).json()["access_token"]
     return {"Authorization": f"Bearer {tok}"}
 
 

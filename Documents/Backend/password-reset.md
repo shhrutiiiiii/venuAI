@@ -67,3 +67,11 @@ One real SMTP round-trip per `/auth/forgot-password` call — bounded by the 5/m
 
 ## Notes for Developers
 If you add a second kind of short-lived, self-expiring token (anything with the shape "sign it, email/link it, verify it once within N minutes"), follow this same pattern — a `type` claim in a JWT signed with the existing secret — before reaching for a new database table. `VENUAI/oauth.py`'s CSRF state token and this module's reset token are now two real examples of it.
+
+## S1 hardening (supersedes the stateless-JWT token described above)
+
+- Token: `secrets.token_urlsafe(32)`, stored as SHA-256 in `password_reset_tokens`, 15 min, single use (atomic `used_at`), bound to a fingerprint of the current password hash (dies if the password changes any other way). Issuing a new token voids older ones.
+- `POST /auth/forgot-password` always returns `202 {"status":"accepted"}` for known, unknown and SMTP-failing cases; the lookup/send runs in a background task and failures are logged server-side only.
+- `POST /auth/reset-password` checks the password policy before spending the token (a weak password does not burn it), then spends it, updates the password, bumps `token_version`, revokes all refresh tokens and clears lockout.
+- The reset page removes `?token=` from the URL immediately and sets `<meta name="referrer" content="no-referrer">`.
+

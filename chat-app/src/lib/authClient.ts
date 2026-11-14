@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { CSRF_HEADER, CSRF_VALUE } from "@/lib/csrf";
+
+/** Explicit CSRF header on auth calls (also added globally by installCsrfFetch). */
+const JSON_HEADERS = { "Content-Type": "application/json", [CSRF_HEADER]: CSRF_VALUE };
 
 // ─── Zod Schemas ────────────────────────────────────────────────────────────
 
@@ -46,12 +50,12 @@ export async function login(
   try {
     const res = await fetch("/api/auth/login", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: JSON_HEADERS,
       body: JSON.stringify({ email, password }),
     });
     const data = await res.json();
     if (!res.ok) {
-      return { success: false, error: data.detail ?? "Invalid email or password. Please try again." };
+      return { success: false, error: typeof data.detail === "string" ? data.detail : "Invalid email or password. Please try again." };
     }
     return { success: true, user: data.user as AuthUser };
   } catch {
@@ -61,7 +65,7 @@ export async function login(
 
 export const signupSchema = z.object({
   email: z.string().min(1, "Email is required").email("Please enter a valid email address"),
-  password: z.string().min(1, "Password is required").min(6, "Password must be at least 6 characters"),
+  password: z.string().min(1, "Password is required").min(12, "Password must be at least 12 characters"),
   organizationName: z.string().optional(),
 });
 
@@ -73,8 +77,8 @@ export type SignupFormData = z.infer<typeof signupSchema>;
  * itself only returns the created UserOut, not tokens. Passing
  * organization_name creates a brand-new tenant and makes this user its
  * first member (Phase 4 multi-tenancy — see
- * Documents/Backend/multi-tenancy.md); leaving it blank joins the shared
- * "default" tenant, same as every pre-Phase-4 account.
+ * Documents/Backend/multi-tenancy.md); leaving it blank gets a personal
+ * workspace; joining an existing tenant needs an invite (backend-enforced).
  */
 export async function register(
   email: string,
@@ -84,7 +88,7 @@ export async function register(
   try {
     const res = await fetch("/api/auth/register", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: JSON_HEADERS,
       body: JSON.stringify({
         email,
         password,
@@ -93,7 +97,7 @@ export async function register(
     });
     const data = await res.json();
     if (!res.ok) {
-      return { success: false, error: data.detail ?? "Could not create account. Please try again." };
+      return { success: false, error: typeof data.detail === "string" ? data.detail : "Could not create account. Please try again." };
     }
     return login(email, password);
   } catch {
@@ -102,7 +106,7 @@ export async function register(
 }
 
 export async function logout(): Promise<void> {
-  await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+  await fetch("/api/auth/logout", { method: "POST", headers: { [CSRF_HEADER]: CSRF_VALUE } }).catch(() => {});
 }
 
 export async function getSessionUser(): Promise<AuthUser | null> {

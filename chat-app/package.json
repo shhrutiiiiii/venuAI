@@ -6,7 +6,8 @@
     "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:csrf": "node --experimental-strip-types --test src/lib/csrf.test.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.9.1",
