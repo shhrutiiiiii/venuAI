@@ -38,6 +38,10 @@ def _check_history(items: Optional[List[dict]]) -> Optional[List[dict]]:
         if not isinstance(it, dict):
             raise ValueError("invalid history item")
         role, content = it.get("role"), it.get("content")
+        if role is None and content is None:  # the UI's {id, sender, text, timestamp} shape
+            sender = it.get("sender")
+            role = "user" if sender == "user" else ("assistant" if sender in ("ai", "assistant", "bot") else None)
+            content = it.get("text")
         if role not in _ALLOWED_HISTORY_ROLES or not isinstance(content, str):
             raise ValueError("invalid history item")
         if len(content) > HISTORY_ITEM_MAX_CHARS:

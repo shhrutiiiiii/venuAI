@@ -309,7 +309,8 @@ def test_login_failures_are_uniform_for_unknown_wrong_and_locked(client):
         _bad(client)
     locked = client.post("/auth/login", json=DEMO)  # CORRECT password while locked
     assert {r.status_code for r in (unknown, wrong, locked)} == {401}
-    assert unknown.json() == wrong.json() == locked.json()
+    strip = lambda r: {k: v for k, v in r.json().items() if k != "request_id"}  # request_id is per-request
+    assert strip(unknown) == strip(wrong) == strip(locked)
 
 
 def test_lockout_is_not_extended_while_locked_and_cannot_be_bypassed(client, isolated_auth_db):

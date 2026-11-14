@@ -309,6 +309,8 @@ def test_no_str_e_leaks_in_response_paths():
         if "tests" in p.parts or "evals" in p.parts:
             continue
         for n, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+            if "BudgetRefused" in line or "detail=str(refused)" in line:
+                continue  # BudgetRefused carries the fixed token_budget.EXHAUSTED_MESSAGE, not exception text
             if any(rx.search(line) for rx in patterns):
                 bad.append(f"{p.name}:{n}: {line.strip()}")
     assert not bad, "str(e) leaks:\n" + "\n".join(bad)

@@ -394,9 +394,10 @@ def test_stream_emits_ordered_steps_then_done_with_full_shape(client, auth_heade
     assert "<followups" not in tokens and "<citations>" not in tokens
 
 
-def test_health_is_deep_and_has_no_secrets(client):
+def test_health_is_minimal_and_has_no_secrets(client):
+    # S4: the public /health is minimal; the dependency detail moved to the admin-only /health/details
     b = client.get("/health").json()
-    assert "dependencies" in b and "groq_key_present" in b["dependencies"] and "circuit_breakers" in b["dependencies"]
+    assert b == {"status": "ok"}
     assert "gsk_" not in json.dumps(b)
 
 

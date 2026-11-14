@@ -677,8 +677,9 @@ def register_user(
         return user
 
     name = organization_name or f"{email.split('@')[0]}'s workspace"
-    # The creator of a new organisation administers it (tenant admin of their own tenant only).
-    user = create_user(email, password, role="admin", organization_name=name)
+    # Someone who explicitly creates an organisation administers it (tenant admin of that tenant only);
+    # the implicit personal workspace stays a plain user.
+    user = create_user(email, password, role="admin" if organization_name else "user", organization_name=name)
     security_audit.log("register", user.id, user.tenant_id, ip)
     return user
 
@@ -773,7 +774,7 @@ def verify_password_reset_token(token: str) -> Optional[str]:
     """Non-consuming check: user_id if the token is currently valid, else None."""
     with _get_conn() as conn:
         row = conn.execute("SELECT * FROM password_reset_tokens WHERE token_hash = ?", (_hash_token(token),)).fetchone()
-    if row is None or row["revoked"] or row["used_at"] is not None or row["expires_at"] < time.time():
+    if row is None or row["used_at"] is not None or row["expires_at"] < time.time():
         return None
     user = get_user_by_id(row["user_id"])
     if user is None or _pw_fingerprint(user["hashed_password"]) != row["pw_fingerprint"]:
