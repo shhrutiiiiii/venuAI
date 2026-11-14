@@ -313,6 +313,11 @@ def _neutralise_markup(text: str) -> str:
     return _PROMPT_TAG_RE.sub(lambda m: f"[{m.group(1)}{m.group(2).split()[0]}]", text)
 
 
+def _followup_rule() -> str:
+    from VENUAI.followups import FOLLOWUP_RULE
+    return FOLLOWUP_RULE
+
+
 def build_drdo_prompt(
     question: str,
     ranked_docs: List[Document],
@@ -321,6 +326,8 @@ def build_drdo_prompt(
     semantic_memories: Optional[List[str]] = None,
     citations: bool = True,
     info: Optional[dict] = None,
+    followups: bool = False,
+    feedback: Optional[str] = None,
 ) -> str:
     """
     Build the final DRDO prompt using XML-style section tags ordered by
@@ -385,6 +392,7 @@ def build_drdo_prompt(
         "(under 25 words) VERBATIM quote copied character-for-character from that document:\n"
         "<citations>\n[1] \"verbatim quote\"\n[2] \"verbatim quote\"\n</citations>\n"
         "If the evidence does not contain the answer, say so plainly instead of citing."
+        + (chr(10) + _followup_rule() if followups else "")
         if citations else
         "5. End with a brief italicised source citation: *Source: [document name, page X]*."
     )
@@ -461,6 +469,8 @@ def build_drdo_prompt(
 
     logger.debug(f"[build_drdo_prompt] Token budget usage:\n{budget.summary()}")
 
+    feedback_block = (chr(10) + "<reviewer_feedback>" + chr(10) + feedback[:1200] + chr(10) + "</reviewer_feedback>" + chr(10)) if feedback else ""
+
     # ── Assemble ──────────────────────────────────────────────────────────────
     prompt = f"""<system_role>
 {system_role}
@@ -489,7 +499,7 @@ def build_drdo_prompt(
 <question>
 {question}
 </question>
-
+{feedback_block}
 Answer (technical, formatted with headings, tables, bullet points, bold terms, and source citations):"""
 
     return prompt
