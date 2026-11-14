@@ -251,7 +251,7 @@ def test_kb_fallback_is_labelled_and_never_hardcoded(monkeypatch):
     assert out["grounding_score"] is None and out["verified"] is False
     assert out["answer_basis"] == "builtin_knowledge_base"
     assert "not from your documents" in out["answer"]
-    assert out["sources"][0].document == answer_pipeline.KB_FILENAME
+    assert out["sources"][0].document.startswith(answer_pipeline.KB_FILENAME)  # may carry the matched topic suffix
 
 
 def test_no_hardcoded_score_literals_in_rag_server():
