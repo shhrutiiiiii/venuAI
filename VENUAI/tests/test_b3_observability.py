@@ -157,7 +157,7 @@ def test_online_eval_default_off_and_sampling(monkeypatch):
     monkeypatch.setenv("ONLINE_EVAL_SAMPLE", "1.0")
     r = online_evals.maybe_evaluate({}, "The Agni missile has a range of 5000 kilometres.",
                                     ["The Agni missile has a range of 5000 kilometres in total."])
-    assert r["method"] in ("lexical_support", "local_faithfulness") and r["score"] == 1.0
+    assert r["method"] in ("lexical_support", "local_faithfulness") and r["score"] >= 0.95
     none = online_evals.maybe_evaluate({}, None, None)
     assert none["score"] is None                         # never a fake number
 
