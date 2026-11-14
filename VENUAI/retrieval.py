@@ -141,12 +141,89 @@ _corpus_version = 0
 _cache: Dict[str, Any] = {"vs": None, "key": None, "index": None}
 
 
-def bump_corpus_version() -> None:
-    """Call after any upload / delete so the next query rebuilds the BM25 index."""
+def bump_corpus_version(tenant_id: Optional[str] = None) -> None:
+    """Call after any upload / delete so the next query rebuilds the BM25 index and the
+    answer cache is invalidated (tenant_id scopes the invalidation; None = all tenants)."""
     global _corpus_version
     with _cache_lock:
         _corpus_version += 1
         _cache.update(vs=None, key=None, index=None)
+    try:
+        from VENUAI import semantic_cache
+        semantic_cache.invalidate(tenant_id)
+    except Exception as err:  # noqa: BLE001 - cache invalidation must never break an upload
+        logger.warning(f"[Retrieval] answer-cache invalidation failed: {err}")
+
+
+def get_corpus_version() -> int:
+    return _corpus_version
+
+
+def get_vectorstore():
+    """Seam for other modules (agents, research, health): the app's shared Chroma store.
+    Imported lazily so retrieval.py never imports rag_server at module load."""
+    from VENUAI import rag_server
+    return rag_server.get_vector_store()
+
+
+_MULTIHOP_CUES = re.compile(r"\b(both|and also|as well as|relationship|related to|connected|compare|"
+                            r"which .* (of|that)|who .* (of|that)|between)\b", re.I)
+
+
+def _flag(name: str) -> bool:
+    return os.getenv(name, "off").strip().lower() in ("on", "1", "true", "force")
+
+
+def _optional_sources(question: str, tenant_id: Optional[str], allowed_doc_ids: Optional[List[str]],
+                      force_kg: bool) -> List[List[Document]]:
+    """KG-PPR (B2 kg_retrieval) and RAPTOR summaries (B2 raptor) as extra RRF sources.
+    Guarded: absent module / flag off / any error -> no extra source."""
+    out: List[List[Document]] = []
+    if (_flag("KG_RETRIEVAL") and (force_kg or os.getenv("KG_RETRIEVAL", "").lower() == "force"
+                                   or _MULTIHOP_CUES.search(question))):
+        try:
+            from VENUAI import kg_retrieval
+            docs = kg_retrieval.retrieve_graph(question, tenant_id or "default", allowed_doc_ids, k=8)
+            if docs:
+                for d in docs:
+                    d.metadata = {**(d.metadata or {}), "retriever": d.metadata.get("retriever", "kg_ppr")}
+                out.append(list(docs))
+        except ImportError:
+            logger.debug("kg_retrieval not present")
+        except Exception as err:  # noqa: BLE001
+            logger.warning(f"[Retrieval] KG retrieval skipped: {err}")
+    if _flag("RAPTOR"):
+        try:
+            from VENUAI import raptor
+            docs = raptor.retrieve_summaries(question, tenant_id or "default", allowed_doc_ids, k=3)
+            if docs:
+                out.append(list(docs))
+        except ImportError:
+            logger.debug("raptor not present")
+        except Exception as err:  # noqa: BLE001
+            logger.warning(f"[Retrieval] RAPTOR retrieval skipped: {err}")
+    return out
+
+
+def _expand_parents(vs, docs: List[Document], max_chars: int = 1800) -> None:
+    """Parent-section expansion: widen each kept chunk with its same-page neighbours."""
+    for d in docs:
+        m = d.metadata or {}
+        if m.get("doc_id") is None or m.get("page") is None or m.get("region_id") is not None:
+            continue
+        try:
+            got = vs.get(where={"$and": [{"doc_id": m["doc_id"]}, {"page": m["page"]}]})
+            texts = [t for t in (got or {}).get("documents") or [] if t and t != d.page_content]
+        except Exception:  # noqa: BLE001
+            continue
+        extra = ""
+        for t in texts:
+            if len(d.page_content) + len(extra) + len(t) > max_chars:
+                break
+            extra += "\n" + t
+        if extra:
+            d.page_content = d.page_content + extra
+            d.metadata = {**m, "expanded_parent": True}
 
 
 def _collection_count(vs) -> Optional[int]:
@@ -230,6 +307,7 @@ def retrieve_documents(
     vs, question: str, top_k: int, allowed_doc_ids: Optional[List[str]],
     history: Optional[List[dict]] = None, rewrite: bool = True,
     extra_queries: Optional[List[str]] = None, include_regions: bool = True,
+    tenant_id: Optional[str] = None, expand_parent: bool = False, force_kg: bool = False,
 ) -> RetrievalResult:
     from VENUAI import reranker
     from VENUAI.query_rewriter import rewrite_query
@@ -271,6 +349,13 @@ def retrieve_documents(
                 docs_by_key.setdefault(k_, d)
                 fused[k_] = fused.get(k_, 0.0) + 1.0 / (RRF_K + rank + 1)
                 bm25_hit.add(k_)
+
+    for src in _optional_sources(question, tenant_id, allowed_doc_ids, force_kg):
+        for rank, d in enumerate(src):
+            k_ = _key(d)
+            docs_by_key.setdefault(k_, d)
+            fused[k_] = fused.get(k_, 0.0) + 1.0 / (RRF_K + rank + 1)
+            bm25_hit.add(k_)
 
     ordered = sorted(fused, key=fused.get, reverse=True)[:pool]
     cands = [docs_by_key[k_] for k_ in ordered]
@@ -323,6 +408,8 @@ def retrieve_documents(
         out_docs.append(d)
         out_scores.append({"doc_id": d.metadata.get("doc_id"), "page": d.metadata.get("page"), **info})
 
+    if expand_parent and out_docs:
+        _expand_parents(vs, out_docs)
     return RetrievalResult(
         documents=out_docs, scores=out_scores,
         insufficient_context=not out_docs, signal=signal,

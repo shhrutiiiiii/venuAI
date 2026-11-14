@@ -345,9 +345,19 @@ def test_stream_normal_path_has_real_verification_and_citations(client, auth_hea
                     yield t
             return gen()
 
+    class _SyncGwStream:
+        model_used = "openai/gpt-oss-120b"
+        ttft_ms = 5.0
+
+        def __iter__(self):
+            return iter(toks)
+
     class _FakeGw:
         async def astream(self, *a, **k):
             return _GwStream()
+
+        def stream(self, *a, **k):   # /query/stream now runs the pipeline in a worker thread
+            return _SyncGwStream()
     monkeypatch.setattr("VENUAI.ai_gateway.gateway.get_gateway", lambda: _FakeGw())
     monkeypatch.setattr("groq.Groq", lambda api_key=None, **k: object())
     seen = {}

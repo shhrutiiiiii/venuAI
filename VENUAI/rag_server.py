@@ -13,6 +13,7 @@ Endpoints:
 
 import os
 import sys
+import time
 import uuid
 import json
 import logging
@@ -142,6 +143,21 @@ for _mod in ("research_api", "voice_api", "memory_api", "trace_api",
     except ImportError as _e:
         logger.warning("optional router %s failed to import: %s", _mod, _e)
 
+def _start_model_warmup() -> None:
+    """Load the NLI verifier + reranker in a background thread so the first request does not
+    pay the (tens of seconds) model-load cost. Skipped under pytest and WARMUP_MODELS=off."""
+    if os.getenv("WARMUP_MODELS", "on").strip().lower() in ("off", "0", "false") or "pytest" in sys.modules:
+        return
+    import threading
+    from VENUAI.answer_pipeline import warm_models
+    threading.Thread(target=warm_models, daemon=True, name="model-warmup").start()
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    _start_model_warmup()
+
+
 # ── Lazy-loaded singletons (initialized on first use) ─────────────────────────
 _embeddings = None
 _vector_store = None
@@ -161,12 +177,16 @@ def get_embeddings():
     if _embeddings is None:
         name = get_embedding_model_name()
         logger.info(f"Loading embedding model ({name})...")
-        from langchain_community.embeddings import HuggingFaceEmbeddings
-        _embeddings = HuggingFaceEmbeddings(
-            model_name=name,
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True},
-        )
+        try:   # stream B2: env-selectable embedding model (default MiniLM)
+            from VENUAI.embeddings_config import get_embeddings as _cfg_embeddings
+            _embeddings = _cfg_embeddings()
+        except ImportError:
+            from langchain_community.embeddings import HuggingFaceEmbeddings
+            _embeddings = HuggingFaceEmbeddings(
+                model_name=name,
+                model_kwargs={"device": "cpu"},
+                encode_kwargs={"normalize_embeddings": True},
+            )
         logger.info("Embedding model loaded")
     return _embeddings
 
@@ -189,7 +209,7 @@ class _GatewayLLM:
     timeouts, reasoning-effort handling and telemetry. The result carries
     `.model_id` = the model that actually answered."""
 
-    def invoke(self, prompt_text: str):
+    def invoke(self, prompt_text: str, prefer_model: Optional[str] = None, effort: Optional[str] = None):
         from types import SimpleNamespace
         from VENUAI.ai_gateway.gateway import get_gateway
         from VENUAI.ai_gateway.model_router import TaskType
@@ -198,6 +218,8 @@ class _GatewayLLM:
             messages=[{"role": "user", "content": prompt_text}],
             max_tokens=1500,
             temperature=0.2,
+            prefer_model=prefer_model,
+            reasoning_effort=effort,
         )
         return SimpleNamespace(content=result.content, model_id=result.model_id)
 
@@ -290,6 +312,10 @@ class QueryRequest(BaseModel):
     user_id: Optional[str] = None
     agent_mode: bool = False        # ReAct agentic loop
     multi_agent_mode: bool = False  # specialist multi-agent routing
+    # Optional scope: intersected with the caller's authorised doc ids (never widens access).
+    doc_ids: Optional[List[str]] = None
+    # "fast" skips the corrective loop; "standard" (default) / "deep" run it.
+    depth: str = "standard"
 
 
 class QuerySource(BaseModel):
@@ -325,6 +351,18 @@ class QueryResponse(BaseModel):
     answer_basis_notice: Optional[str] = None
     quarantined_chunks: int = 0
     trace_id: Optional[str] = None
+    # Pipeline fields (VENUAI/run_turn.py). None / [] = not produced for this mode, never invented.
+    retrieved_chunks: List[dict] = []
+    usage: Optional[dict] = None            # provider-reported tokens; null fields when unknown
+    ttft_ms: Optional[int] = None
+    latency_ms: Optional[int] = None
+    cache_hit: bool = False
+    model_path: List[str] = []              # models that produced answer text, in order (cascade)
+    followups: List[str] = []
+    contradictions: List[dict] = []
+    corrective: Optional[dict] = None       # {iterations, actions}
+    memories_used: List[dict] = []
+    pending_approval: Optional[dict] = None
 
 
 class DocumentInfo(BaseModel):
@@ -670,17 +708,54 @@ def _llm_health() -> dict:
     }
 
 
+def _deep_health() -> dict:
+    """Dependency checks that never load a model and never expose secrets."""
+    out: dict = {}
+    try:
+        if _vector_store is not None:
+            out["chroma"] = {"ok": True, "chunks": int(_vector_store._collection.count())}
+        else:
+            import chromadb
+            hb = chromadb.PersistentClient(path=str(CHROMA_DIR)).heartbeat()
+            out["chroma"] = {"ok": bool(hb), "loaded": False}
+    except Exception as e:  # noqa: BLE001
+        out["chroma"] = {"ok": False, "error": type(e).__name__}
+    out["groq_key_present"] = bool(os.getenv("GROQ_API_KEY"))
+    try:
+        from VENUAI.hallucination_detector import get_hallucination_detector
+        out["nli_model_loaded"] = get_hallucination_detector()._nli_model is not None
+    except Exception:  # noqa: BLE001
+        out["nli_model_loaded"] = False
+    try:
+        from VENUAI import reranker
+        out["reranker_loaded"] = bool(getattr(reranker, "_model", None) or getattr(reranker, "_reranker", None))
+    except Exception:  # noqa: BLE001
+        out["reranker_loaded"] = False
+    try:
+        from VENUAI.ai_gateway.gateway import get_gateway
+        out["circuit_breakers"] = get_gateway().breaker_states()
+    except Exception:  # noqa: BLE001
+        out["circuit_breakers"] = {}
+    from VENUAI import semantic_cache, model_cascade
+    out["answer_cache"] = semantic_cache.mode()
+    out["model_cascade"] = model_cascade.enabled()
+    out["status"] = "ok" if out["chroma"].get("ok") and out["groq_key_present"] else "degraded"
+    return out
+
+
 @app.get("/health")
 def health_check():
     meta = load_metadata()
+    deep = _deep_health()
     return {
-        "status": "ok",
+        "status": deep.pop("status"),
         "service": "DRDO VenuAI RAG Server",
         "version": "1.1.0",
         "documents_ingested": len(meta),
         "vector_store": "ChromaDB (local)",
         "embedding_model": get_embedding_model_name(),
         "llm": _llm_health(),
+        "dependencies": deep,
         "note": "Embedding model loads on first upload/query",
     }
 
@@ -774,6 +849,14 @@ async def upload_document(
 
     num_chunks = len(chunks)
     logger.info(f"Stored {num_chunks} chunks for doc {doc_id} ({file.filename})")
+    if os.getenv("RAPTOR", "off").strip().lower() in ("on", "1", "true"):
+        try:   # stream B2 seam; costs LLM calls, so opt-in and best-effort
+            from VENUAI import raptor
+            await run_in_threadpool(raptor.build_summaries, doc_id, current_user.tenant_id, chunks)
+        except ImportError:
+            logger.debug("raptor module not present")
+        except Exception as err:  # noqa: BLE001
+            logger.warning(f"[RAPTOR] summary build skipped for {doc_id}: {err}")
 
     from datetime import datetime
     meta = load_metadata()
@@ -896,6 +979,16 @@ class RAGGraphState(TypedDict):
     safety_check: str
     blocked: bool
     block_reason: Optional[str]
+    # Pipeline controls / outputs (VENUAI/run_turn.py)
+    tenant_id: str
+    depth: str
+    want_followups: bool
+    model_hint: dict
+    feedback: Optional[str]
+    extra_queries: List[str]
+    corrective_actions: List[str]
+    followups: List[str]
+    memories: List[dict]
 
 
 def get_visible_doc_ids(current_user: AuthenticatedUser) -> Optional[List[str]]:
@@ -925,24 +1018,43 @@ def get_visible_doc_ids(current_user: AuthenticatedUser) -> Optional[List[str]]:
 
 def retrieve_node(state: RAGGraphState) -> dict:
     """
-    History-aware rewrite -> dense + cached BM25 -> RRF -> cross-encoder
-    rerank -> relevance floor. All of it lives in VENUAI.retrieval (shared
-    with agentic_rag / agent_tools). Authorization: allowed_doc_ids filters
-    every stage; an empty list retrieves nothing.
+    History-aware rewrite -> dense + cached BM25 (+ optional KG / RAPTOR sources) -> RRF ->
+    cross-encoder rerank -> relevance floor. All of it lives in VENUAI.retrieval (shared
+    with agentic_rag / agent_tools). Authorization: allowed_doc_ids filters every stage; an
+    empty list retrieves nothing. Retrieval grading: when the best rerank score is weak
+    (borderline) the fast model judges relevance (structured) and, if the passages do not
+    answer the question, ONE re-retrieval with its better query is made (corrective action
+    "re_retrieve", capped, depth != fast).
     """
     from VENUAI.retrieval import retrieve_documents
+    from VENUAI import corrective_rag
 
     question = state["question"]
     top_k = state.get("top_k", 4)
-    res = retrieve_documents(
-        get_vector_store(), question, top_k, state.get("allowed_doc_ids"),
-        history=state.get("history") or state.get("working_memory") or [],
-    )
+    kw: dict = {}
+    if state.get("tenant_id"):
+        kw["tenant_id"] = state["tenant_id"]
+    if state.get("extra_queries"):
+        kw["extra_queries"] = state["extra_queries"]
+    history = state.get("history") or state.get("working_memory") or []
+    vs = get_vector_store()
+    res = retrieve_documents(vs, question, top_k, state.get("allowed_doc_ids"), history=history, **kw)
+    actions: List[str] = []
+    if (res.documents and not state.get("extra_queries") and corrective_rag.max_iters() > 0
+            and corrective_rag.enabled_for(state.get("depth"))
+            and corrective_rag.grade_retrieval(res.scores) == "borderline"):
+        g = corrective_rag.llm_grade(question, res.documents)
+        if g and g.get("relevant") is False and (g.get("better_query") or "").strip():
+            kw["extra_queries"] = [g["better_query"].strip()]
+            res2 = retrieve_documents(vs, question, top_k, state.get("allowed_doc_ids"), history=history, **kw)
+            if res2.documents:
+                res, actions = res2, ["re_retrieve"]
     return {
         "documents": res.documents,
         "retrieval_query": res.retrieval_query,
         "retrieval_scores": res.scores,
         "insufficient_context": res.insufficient_context,
+        "corrective_actions": actions,
     }
 
 
@@ -980,8 +1092,18 @@ def _kb_notice() -> str:
     return KB_NOTICE
 
 
-def _kb_fallback_docs() -> List[Document]:
-    """Built-in KB as a clearly-labelled document, or [] if no KB is available."""
+def _kb_fallback_docs(question: Optional[str] = None) -> List[Document]:
+    """Built-in KB as clearly-labelled, citable per-entry documents (stream B2's
+    kb_documents when present), else the legacy single dump, or [] if no KB is available."""
+    try:
+        from VENUAI.kb_documents import kb_fallback_documents
+        docs = kb_fallback_documents(question or "", k=5)
+        if docs:
+            return docs
+    except ImportError:
+        pass
+    except Exception as err:  # noqa: BLE001
+        logger.warning(f"kb_documents unavailable, using legacy KB dump: {err}")
     from VENUAI.answer_pipeline import kb_document
     kb_data = load_prefilled_kb()
     if not kb_data:
@@ -1005,44 +1127,53 @@ def _sources_from_docs(docs: List[Document]) -> List[QuerySource]:
     return sources
 
 
-def generate_node(state: RAGGraphState) -> dict:
-    """
-    Generate an answer using Context Engineering for optimal prompt quality.
-    Integrates: rank_chunks, compress_history, build_drdo_prompt, semantic_memories.
-    The raw answer (still carrying the <citations> block) is post-processed in verify_node.
-    """
-    from VENUAI.context_engineer import (
-        ContextBudget, rank_chunks, compress_history, build_drdo_prompt
-    )
+def _build_generation_prompt(state: dict):
+    """Prompt for the generation call (shared by generate_node and the streaming path).
+    Returns (prompt_text, prompt_docs, answer_basis, prompt_info). Static instructions come
+    first and per-request data last so provider-side prompt caching can reuse the prefix."""
+    from VENUAI.context_engineer import ContextBudget, rank_chunks, compress_history, build_drdo_prompt
     from VENUAI.answer_pipeline import ANSWER_BASIS_DOCUMENTS, ANSWER_BASIS_KB, ANSWER_BASIS_NONE
 
     question = state["question"]
-    docs     = state.get("documents", [])
-    history  = state.get("history") or []
-    sem_mems = state.get("semantic_memories", [])
+    docs = state.get("documents", [])
+    history = state.get("history") or []
+    sem_mems = list(state.get("semantic_memories", []) or [])
 
     ranked_docs = rank_chunks(docs, question)
     answer_basis = ANSWER_BASIS_DOCUMENTS if ranked_docs else ANSWER_BASIS_NONE
     if not ranked_docs:
-        ranked_docs = _kb_fallback_docs()
+        ranked_docs = _kb_fallback_docs(question)
         if ranked_docs:
             answer_basis = ANSWER_BASIS_KB
 
-    compressed_history = compress_history(history, max_turns=6)
-    budget             = ContextBudget()
-    prompt_info: dict  = {}
-    prompt_text        = build_drdo_prompt(
+    prompt_info: dict = {}
+    prompt_text = build_drdo_prompt(
         question=question,
         ranked_docs=ranked_docs,
-        compressed_history=compressed_history,
-        budget=budget,
-        semantic_memories=sem_mems or [],
+        compressed_history=compress_history(history, max_turns=6),
+        budget=ContextBudget(),
+        semantic_memories=sem_mems,
         info=prompt_info,
+        followups=bool(state.get("want_followups")) and answer_basis != ANSWER_BASIS_NONE,
+        feedback=state.get("feedback"),
     )
-    prompt_docs = prompt_info.get("used_docs", [])
+    return prompt_text, prompt_info.get("used_docs", []), answer_basis, prompt_info
+
+
+def generate_node(state: RAGGraphState) -> dict:
+    """
+    Generate an answer using Context Engineering for optimal prompt quality.
+    The raw answer (still carrying the <citations> / <followups> blocks) is post-processed
+    in verify_node. state["model_hint"] ({prefer_model, effort}) is the cascade's choice.
+    """
+    prompt_text, prompt_docs, answer_basis, prompt_info = _build_generation_prompt(state)
 
     llm = get_llm()
-    res = llm.invoke(prompt_text)
+    hint = state.get("model_hint") or {}
+    if hint and isinstance(llm, _GatewayLLM):
+        res = llm.invoke(prompt_text, prefer_model=hint.get("prefer_model"), effort=hint.get("effort"))
+    else:
+        res = llm.invoke(prompt_text)
     answer_text = res.content if hasattr(res, "content") else str(res)
     answered_by = getattr(res, "model_id", None) or _primary_model_label()
 
@@ -1058,25 +1189,49 @@ def generate_node(state: RAGGraphState) -> dict:
 
 
 def _postprocess_answer(raw_answer: str, question: str, prompt_docs: List[Document],
-                        user_id: str, answer_basis: str, light: bool = False) -> dict:
+                        user_id: str, answer_basis: str, light: bool = False,
+                        want_followups: bool = False) -> dict:
     """
-    Shared tail for every answer path: split + verify citations, verify the answer
-    (fail-closed), then output guardrails + policy classifier. Returns graph-state fields.
+    Shared tail for every answer path: split follow-ups + verify citations, verify the answer
+    (fail-closed; independent checks run concurrently), then output guardrails + policy
+    classifier (its LLM call overlaps the verification). Returns graph-state fields.
     """
-    from VENUAI.answer_pipeline import (
-        split_citations, run_verification, apply_output_safety, ANSWER_BASIS_KB, KB_NOTICE,
-    )
+    import inspect
+    from concurrent.futures import ThreadPoolExecutor
+    from VENUAI import answer_pipeline as ap
+    from VENUAI import followups as fu
     from VENUAI.grounded_citations import verify_citations
 
-    clean, quotes = split_citations(raw_answer)
-    ver = run_verification(clean, question, prompt_docs, light=light)
-    final_answer = ver.pop("final_answer")
-    citations = verify_citations(final_answer, quotes, prompt_docs)
-    safe = apply_output_safety(final_answer, ver.get("grounding_score"), user_id=user_id)
+    raw_clean, fups = fu.split_followups(raw_answer)
+    clean, quotes = ap.split_citations(raw_clean)
+    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="post")
+    fb_future = verdict_future = None
+    try:
+        if want_followups and not fups and clean and answer_basis == ap.ANSWER_BASIS_DOCUMENTS:
+            fb_future = ap.ctx_submit(pool, fu.fallback_followups, question, clean)
+        if "verdict" in inspect.signature(ap.apply_output_safety).parameters:
+            from VENUAI import safety_classifiers as sc
+            verdict_future = ap.ctx_submit(pool, sc.safeguard_classify, clean)
+        ver = ap.run_verification(clean, question, prompt_docs, light=light)
+        final_answer = ver.pop("final_answer")
+        citations = verify_citations(final_answer, quotes, prompt_docs)
+        if verdict_future is not None:
+            safe = ap.apply_output_safety(final_answer, ver.get("grounding_score"), user_id=user_id,
+                                          verdict=verdict_future.result())
+        else:
+            safe = ap.apply_output_safety(final_answer, ver.get("grounding_score"), user_id=user_id)
+        if fb_future is not None:
+            try:
+                fups = fb_future.result()
+            except Exception:  # noqa: BLE001
+                fups = []
+    finally:
+        pool.shutdown(wait=False)
     if safe["blocked"]:
         ver["verified"] = False
         ver["verification_reason"] = "answer withheld by output safety policy"
         citations = []
+        fups = []
     result = {
         **ver,
         "answer": safe["answer"],
@@ -1085,10 +1240,11 @@ def _postprocess_answer(raw_answer: str, question: str, prompt_docs: List[Docume
         "safety_check": safe["safety_check"],
         "blocked": safe["blocked"],
         "block_reason": safe["block_reason"],
+        "followups": fups,
     }
-    if answer_basis == ANSWER_BASIS_KB and not safe["blocked"]:
-        result["answer"] = f"_{KB_NOTICE}_\n\n{result['answer']}"
-        result["annotated_answer"] = f"_{KB_NOTICE}_\n\n{result['annotated_answer']}"
+    if answer_basis == ap.ANSWER_BASIS_KB and not safe["blocked"]:
+        result["answer"] = f"_{ap.KB_NOTICE}_\n\n{result['answer']}"
+        result["annotated_answer"] = f"_{ap.KB_NOTICE}_\n\n{result['annotated_answer']}"
     return result
 
 
@@ -1102,6 +1258,7 @@ def verify_node(state: RAGGraphState) -> dict:
         state.get("answer", ""), state.get("question", ""),
         state.get("prompt_docs") or state.get("documents", []),
         state.get("user_id") or "user", state.get("answer_basis") or "uploaded_documents",
+        want_followups=bool(state.get("want_followups")),
     )
 
 
@@ -1111,7 +1268,7 @@ def fallback_kb_node(state: RAGGraphState) -> dict:
     from VENUAI.context_engineer import ContextBudget, build_drdo_prompt
     from VENUAI.answer_pipeline import ANSWER_BASIS_KB
 
-    kb_docs = _kb_fallback_docs()
+    kb_docs = _kb_fallback_docs(state.get("question"))
     if not kb_docs:
         raise HTTPException(status_code=404, detail="No documents in knowledge base.")
 
@@ -1170,6 +1327,166 @@ workflow.add_edge("fallback_kb", END)
 venuai_graph = workflow.compile()
 
 
+_RESPONSE_FIELDS = set(QueryResponse.model_fields)
+
+
+def _mod():
+    return sys.modules[__name__]
+
+
+def _to_response(result: dict, **overrides) -> QueryResponse:
+    """Plain-dict turn result -> QueryResponse (unknown keys dropped, nothing invented)."""
+    data = {k: v for k, v in result.items() if k in _RESPONSE_FIELDS}
+    if "sources" in data:
+        data["sources"] = [s if isinstance(s, QuerySource) else QuerySource(**s) for s in data["sources"]]
+    data.setdefault("answer", "No response generated.")
+    data.setdefault("model", result.get("model_used") or "LangGraph Workflow")
+    data.setdefault("chunks_retrieved", len(result.get("documents") or result.get("retrieved_chunks") or []))
+    data["annotated_answer"] = result.get("annotated_answer") or data["answer"]
+    if result.get("answer_basis") == "builtin_knowledge_base":
+        data["answer_basis_notice"] = _kb_notice()
+    data["quarantined_chunks"] = result.get("quarantined", result.get("quarantined_chunks", 0)) or 0
+    data.update(overrides)
+    return QueryResponse(**data)
+
+
+def _initial_state(ctx, mem_ctx: dict, current_user) -> dict:
+    from VENUAI import followups as _fu
+    from VENUAI import model_cascade as _mc
+    plan = _mc.plan_generation(ctx.question, downshift=ctx.downshift)
+    ctx.plan = plan
+    mem_texts = list(mem_ctx.get("semantic", [])) + [m["text"] for m in ctx.memories]
+    return {
+        "question": ctx.question, "top_k": ctx.top_k, "history": ctx.history, "documents": [],
+        "answer": "", "sources": [], "model_used": "",
+        "working_memory": mem_ctx.get("working", []), "semantic_memories": mem_texts,
+        "grounding_score": None, "hallucination_score": None, "verification_flags": [],
+        "annotated_answer": "", "allowed_doc_ids": ctx.allowed_doc_ids,
+        "evidence_coverage": None, "unsupported_claim_count": None, "contradicted_claim_count": None,
+        "critique_passed": False, "evidence_claims": [], "retrieval_query": ctx.question,
+        "retrieval_scores": [], "insufficient_context": False, "user_id": current_user.id,
+        "tenant_id": current_user.tenant_id, "depth": ctx.depth,
+        "want_followups": _fu.enabled(),
+        "model_hint": ({"prefer_model": plan.prefer_model, "effort": plan.effort}
+                       if (plan.prefer_model or plan.effort) else {}),
+        "feedback": None, "extra_queries": [], "corrective_actions": [], "followups": [],
+    }
+
+
+def _corrective_and_finish(ctx, base: dict, first: dict) -> dict:
+    """Shared by /query and /query/stream: capped corrective loop, then the common tail."""
+    from VENUAI import run_turn as rt
+
+    def regenerate(prev: dict, new_docs, feedback: List[str], plan) -> dict:
+        st = dict(base)
+        st["documents"] = new_docs or prev.get("documents") or prev.get("prompt_docs") or []
+        st["retrieval_scores"] = prev.get("retrieval_scores", [])
+        st["model_hint"] = ({"prefer_model": plan.prefer_model, "effort": plan.effort}
+                            if (plan.prefer_model or plan.effort) else {})
+        if feedback:
+            st["feedback"] = ("These statements in your previous answer are NOT supported by the passages; "
+                              "remove them or restate only what the passages say:\n- " + "\n- ".join(feedback[:5]))
+        ctx.sink.emit("generating", "start", "Regenerating answer")
+        gen = generate_node(st)
+        ctx.note_model(gen.get("model_used"))
+        ctx.sink.emit("generating", "end", "", model=gen.get("model_used"))
+        ctx.sink.emit("verifying", "start", "Verifying answer")
+        ver = verify_node({**st, **gen})
+        ctx.sink.emit("verifying", "end", "", verified=bool(ver.get("verified")))
+        merged = {**prev, **gen, **ver}
+        merged["sources"] = gen.get("sources", prev.get("sources", []))
+        return merged
+
+    def re_retrieve(feedback: List[str]):
+        from VENUAI.retrieval import retrieve_documents
+        extra = [f for f in feedback[:2] if f]
+        if not extra:
+            return None
+        ctx.sink.emit("retrieving", "start", "Searching again")
+        kw = {"tenant_id": ctx.user.tenant_id}
+        res = retrieve_documents(get_vector_store(), ctx.question, ctx.top_k, ctx.allowed_doc_ids,
+                                 history=ctx.history, extra_queries=extra, **kw)
+        ctx.sink.emit("retrieving", "end", f"Found {len(res.documents)} passages", n=len(res.documents))
+        return res.documents or None
+
+    state, cr = rt.corrective_stage(ctx, _mod(), first, regenerate_fn=regenerate, re_retrieve_fn=re_retrieve)
+    pre = list(first.get("corrective_actions") or [])      # grader-driven re-retrieval before generation
+    if pre:
+        cr.actions = pre + [a for a in cr.actions if a not in pre]
+        cr.iterations += len(pre)
+    return rt.finish_turn(ctx, _mod(), state, cr)
+
+
+def _guardrail_blocked_response(g_res, trace_id: str) -> QueryResponse:
+    return QueryResponse(
+        answer=g_res.sanitized_input_or_output, sources=[], model="DRDO Defence Guardrails Policy",
+        chunks_retrieved=0, grounding_score=None, hallucination_score=None,
+        verification_flags=[f"GUARDRAIL_TRIGGERED: {g_res.violation_type}"],
+        annotated_answer=g_res.sanitized_input_or_output, blocked=True,
+        block_reason=g_res.block_reason or g_res.violation_type, verified=False,
+        verification_reason="request blocked by input guardrails", trace_id=trace_id,
+    )
+
+
+def _agent_extras(ctx, mode_tools: List[str]) -> dict:
+    pending = None
+    try:
+        from VENUAI import approvals
+        if hasattr(approvals, "pop_pending"):
+            pending = approvals.pop_pending(ctx.user.id)
+    except Exception as err:  # noqa: BLE001
+        logger.debug(f"approvals.pop_pending unavailable: {err}")
+    return {"pending_approval": pending}
+
+
+def _react_messages_usage(messages) -> tuple:
+    """Real token usage reported by the chat model on each AIMessage (None when unreported)."""
+    p = c = 0
+    seen = False
+    for m in messages:
+        um = getattr(m, "usage_metadata", None)
+        if um:
+            seen = True
+            p += um.get("input_tokens", 0) or 0
+            c += um.get("output_tokens", 0) or 0
+    return (p, c) if seen else (None, None)
+
+
+def _react_run(ctx, question: str, request_tools_builder):
+    """ReAct through the gateway's model chain: each model is tried in order (circuit-breaker
+    aware); rate limits / provider errors move to the next model, anything else is raised."""
+    from langgraph.prebuilt import create_react_agent
+    from VENUAI.ai_gateway.gateway import get_gateway
+    from VENUAI.ai_gateway.model_router import TaskType as _TT, reasoning_effort_for as _eff, route
+    from VENUAI.ai_gateway.model_registry import get_model as _get_model
+
+    gw = get_gateway()
+    last: Optional[Exception] = None
+    for entry in route(_TT.GENERATION):
+        if gw.breaker_open(entry.model_id):
+            continue
+        style = (_get_model(entry.model_id) or entry).reasoning_style
+        llm = get_chat_groq(entry.model_id, temperature=0.2, max_tokens=3000,
+                            reasoning_effort=_eff(_TT.GENERATION) if style == "effort" else None)
+        collected: List[Document] = []
+        tools = request_tools_builder(collected)
+        try:
+            t0 = time.time()
+            result = create_react_agent(llm, tools).invoke(
+                {"messages": [{"role": "user", "content": question}]}, config={"recursion_limit": 8})
+            gw.breaker_record(entry.model_id, True)
+            p, c = _react_messages_usage(result["messages"])
+            if ctx.meter is not None:
+                ctx.meter.record(entry.model_id, "react", p, c, (time.time() - t0) * 1000)
+            ctx.note_model(entry.model_id)
+            return result, collected, entry.model_id
+        except Exception as e:  # noqa: BLE001
+            last = e
+            gw.breaker_record(entry.model_id, False)
+            logger.warning(f"[react] model {entry.model_id} failed ({type(e).__name__}); trying next in chain")
+    raise last or RuntimeError("no model available for the ReAct agent")
+
+
 @app.post("/query", response_model=QueryResponse)
 @limiter.limit("30/minute")
 def query_knowledge_base(
@@ -1179,57 +1496,48 @@ def query_knowledge_base(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
-    Run a RAG query. Supports standard RAG, ReAct agent, and multi-agent modes.
-    Integrates memory management, verification, hallucination detection, and analytics.
+    Run a RAG query. Supports standard RAG, ReAct agent, and multi-agent modes. Every mode
+    ends in the shared tail of VENUAI/run_turn.py (verification, safety, budgets, cache,
+    follow-ups, usage, trace) - see Documents/AI/pipeline.md.
     """
     import time as _time
-    from fastapi import BackgroundTasks
+    from VENUAI import run_turn as rt
     from VENUAI.observability import RequestTrace, new_request_id
 
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    # The authenticated user's own ID is the source of truth for identity —
-    # req.user_id is client-supplied and must never be trusted as an identity
-    # claim (see Documents/Backend/authentication.md Design Principle 4).
+    # The authenticated user's own ID is the source of truth for identity -
+    # req.user_id is client-supplied and must never be trusted.
     req.user_id = current_user.id
-
     trace = RequestTrace(request_id=new_request_id(), route="/query", user_id=current_user.id)
 
-    # Guardrails Input Check
     from VENUAI.guardrails import get_guardrail_engine
-    ge = get_guardrail_engine()
-    g_res = ge.validate_input(req.question, user_id=req.user_id or "anonymous")
+    g_res = get_guardrail_engine().validate_input(req.question, user_id=req.user_id or "anonymous")
     if not g_res.passed:
         trace.log_summary(success=False, extra={"stage": "guardrail_blocked", "violation": g_res.violation_type})
-        return QueryResponse(
-            answer=g_res.sanitized_input_or_output,
-            sources=[],
-            model="DRDO Defence Guardrails Policy",
-            chunks_retrieved=0,
-            grounding_score=None,
-            hallucination_score=None,
-            verification_flags=[f"GUARDRAIL_TRIGGERED: {g_res.violation_type}"],
-            annotated_answer=g_res.sanitized_input_or_output,
-            blocked=True,
-            block_reason=g_res.block_reason or g_res.violation_type,
-            verified=False,
-            verification_reason="request blocked by input guardrails",
-            trace_id=trace.request_id,
-        )
+        return _guardrail_blocked_response(g_res, trace.request_id)
 
     t_start = _time.time()
     agent_used = "rag"
     tools_called: List[str] = []
     error_str = None
 
-    # Fetch memory context
     from VENUAI.memory_manager import get_memory_manager
     mm = get_memory_manager()
-    mem_ctx = mm.get_context(req.session_id, req.user_id or "anonymous", req.question)
-    working_memory   = mem_ctx.get("working", [])
-    semantic_memories = mem_ctx.get("semantic", [])
-    effective_history = req.history or working_memory or []
+    mem_ctx = rt._call_mm(mm.get_context, req.session_id, req.user_id or "anonymous", req.question,
+                          tenant_id=current_user.tenant_id)
+    working_memory = mem_ctx.get("working", [])
+    mode = "multi_agent" if req.multi_agent_mode else ("react" if req.agent_mode else "rag")
+    try:
+        ctx = rt.begin_turn(
+            req.question, current_user, session_id=req.session_id, top_k=req.top_k,
+            history=req.history or working_memory, visible_doc_ids=get_visible_doc_ids(current_user),
+            requested_doc_ids=req.doc_ids, depth=req.depth, mode=mode, trace_id=trace.request_id,
+        )
+    except rt.BudgetRefused as refused:
+        raise HTTPException(status_code=429, detail=str(refused))
+    effective_history = ctx.history
 
     try:
         # Mode: Multi-Agent
@@ -1238,147 +1546,84 @@ def query_knowledge_base(
             from VENUAI.agents.orchestrator import OrchestratorAgent
             orchestrator = OrchestratorAgent(get_groq_client())
             agent_result = asyncio.run(
-                orchestrator.route(
-                    req.question, effective_history, mem_ctx,
-                    allowed_doc_ids=get_visible_doc_ids(current_user),
-                )
+                orchestrator.route(req.question, effective_history, mem_ctx,
+                                   allowed_doc_ids=ctx.allowed_doc_ids)
             )
             agent_used = "multi_agent"
-
-            # Phase 5 — multi-agent mode now runs the same claim-level
-            # VerificationPipeline standard RAG does, using the real
-            # Documents the specialist(s) actually retrieved
-            # (AgentResult.documents — previously discarded after building
-            # QuerySource summaries). Best-effort: a verification failure
-            # must not turn a successful multi-agent answer into a 500.
-            from VENUAI import evidence_store
+            ctx.note_model(agent_result.agent_name)
+            fin = rt.finish_agent_turn(ctx, _mod(), answer=agent_result.answer,
+                                       docs=agent_result.documents, agent_label="multi_agent")
+            ma_ver, ma_safe = fin["ver"], fin["safe"]
             evidence_coverage, unsupported_count, contradicted_count, critique_passed = None, None, None, False
-            from VENUAI.answer_pipeline import run_verification, apply_output_safety, ANSWER_BASIS_DOCUMENTS, ANSWER_BASIS_NONE
-            ma_ver = run_verification(agent_result.answer, req.question, agent_result.documents, light=True)
-            ma_safe = apply_output_safety(ma_ver.pop("final_answer"), ma_ver.get("grounding_score"), user_id=current_user.id)
-            agent_result.answer = ma_safe["answer"]
             try:
+                from VENUAI import evidence_store
                 from VENUAI.verification_pipeline import get_verification_pipeline
                 pipeline_result = get_verification_pipeline().run(
-                    req.question, agent_result.answer, agent_result.documents,
-                )
+                    req.question, fin["answer"], agent_result.documents)
                 evidence_coverage = pipeline_result.evidence_graph.evidence_coverage
                 unsupported_count = pipeline_result.critique.unsupported_claim_count
                 contradicted_count = pipeline_result.critique.contradicted_claim_count
                 critique_passed = pipeline_result.critique.passed
                 background_tasks.add_task(
-                    evidence_store.save_record,
-                    current_user.id, current_user.tenant_id, req.question, agent_result.answer, "multi_agent",
+                    evidence_store.save_record, current_user.id, current_user.tenant_id, req.question,
+                    fin["answer"], "multi_agent",
                     evidence_store.serialize_claims(pipeline_result.evidence_graph.claims),
-                    evidence_coverage, unsupported_count, contradicted_count, critique_passed,
-                )
+                    evidence_coverage, unsupported_count, contradicted_count, critique_passed)
             except Exception as verify_err:
                 logger.warning(f"[multi_agent] VerificationPipeline skipped: {verify_err}")
-
-            trace.log_summary(success=True, extra={"stage": "multi_agent", "retrieval_coverage": agent_result.retrieval_coverage})
+            trace.log_summary(success=True, extra={"stage": "multi_agent",
+                                                   "retrieval_coverage": agent_result.retrieval_coverage})
             t_end = _time.time()
-            background_tasks.add_task(
-                mm.save_turn, req.session_id, req.user_id or "anonymous",
-                req.question, agent_result.answer
-            )
+            background_tasks.add_task(rt._call_mm, mm.save_turn, req.session_id, req.user_id or "anonymous",
+                                      req.question, fin["answer"], tenant_id=current_user.tenant_id)
             from VENUAI.analytics import get_analytics
             background_tasks.add_task(
-                get_analytics().log_query,
-                req.session_id, req.user_id or "anonymous", req.question,
-                len(agent_result.answer), (t_end - t_start) * 1000,
-                ma_ver.get("grounding_score") or 0.0, ma_ver.get("hallucination_score") or 0.0,
-                agent_used, tools_called, None
-            )
+                get_analytics().log_query, req.session_id, req.user_id or "anonymous", req.question,
+                len(fin["answer"]), (t_end - t_start) * 1000, ma_ver.get("grounding_score") or 0.0,
+                ma_ver.get("hallucination_score") or 0.0, agent_used, tools_called, None)
+            from VENUAI.answer_pipeline import ANSWER_BASIS_DOCUMENTS, ANSWER_BASIS_NONE
+            extras = {**fin["extras"], **_agent_extras(ctx, [])}
             return QueryResponse(
-                answer=agent_result.answer,
-                sources=[QuerySource(document=s.document, page=s.page,
-                                     chunk_preview=s.chunk_preview)
+                answer=fin["answer"],
+                sources=[QuerySource(document=s.document, page=s.page, chunk_preview=s.chunk_preview)
                          for s in agent_result.sources],
-                model=agent_result.agent_name,
-                chunks_retrieved=len(agent_result.sources),
+                model=agent_result.agent_name, chunks_retrieved=len(agent_result.sources),
                 grounding_score=ma_ver.get("grounding_score"),
                 hallucination_score=ma_ver.get("hallucination_score"),
                 verification_flags=ma_ver.get("verification_flags", []),
-                annotated_answer=agent_result.answer,
-                evidence_coverage=evidence_coverage,
-                unsupported_claim_count=unsupported_count,
-                contradicted_claim_count=contradicted_count,
-                critique_passed=critique_passed,
-                blocked=ma_safe["blocked"], block_reason=ma_safe["block_reason"],
+                annotated_answer=fin["answer"], evidence_coverage=evidence_coverage,
+                unsupported_claim_count=unsupported_count, contradicted_claim_count=contradicted_count,
+                critique_passed=critique_passed, blocked=ma_safe["blocked"], block_reason=ma_safe["block_reason"],
                 verified=ma_ver["verified"] and not ma_safe["blocked"],
-                verification_reason=ma_ver.get("verification_reason"),
-                safety_check=ma_safe["safety_check"],
+                verification_reason=ma_ver.get("verification_reason"), safety_check=ma_safe["safety_check"],
                 answer_basis=ANSWER_BASIS_DOCUMENTS if agent_result.documents else ANSWER_BASIS_NONE,
-                trace_id=trace.request_id,
+                **extras,
             )
 
-        # Mode: ReAct Agent
+        # Mode: ReAct Agent (model chain with fallback; tools bound to this caller)
         if req.agent_mode:
-            from langgraph.prebuilt import create_react_agent
+            import inspect as _inspect
             from VENUAI.agent_tools import build_agent_tools
-            # LangGraph's prebuilt agent needs a LangChain chat model, so this
-            # path can't use AIGateway.complete; it is built via the central
-            # helper (timeout/retry policy) on the router's first model, and
-            # that model id is reported as the model used.
-            from VENUAI.ai_gateway.model_router import TaskType as _TT, reasoning_effort_for as _eff
-            react_model = _primary_model_label()
-            from VENUAI.ai_gateway.model_registry import get_model as _get_model
-            _entry = _get_model(react_model)
-            _style = _entry.reasoning_style if _entry else ""
-            agent_llm = get_chat_groq(
-                react_model, temperature=0.2, max_tokens=3000,
-                reasoning_effort=_eff(_TT.GENERATION) if _style == "effort" else None,
-            )
-            # Tools are built fresh per request, bound to this caller's identity
-            # and document-visibility set — the ReAct agent can no longer
-            # retrieve/list documents or recall memory outside this user's
-            # authorization. See Documents/Backend/authentication.md.
-            # collected_docs (Phase 5): every real Document drdo_kb_search
-            # retrieves across the agent's tool calls, so this mode can
-            # also get real sources and claim-level verification, not just
-            # a free-text answer — see agent_tools.build_agent_tools's
-            # docstring.
-            collected_docs: List[Document] = []
-            request_tools = build_agent_tools(
-                user_id=current_user.id,
-                allowed_doc_ids=get_visible_doc_ids(current_user),
-                user_role=current_user.role,
-                collected_docs=collected_docs,
-            )
-            react_agent = create_react_agent(agent_llm, request_tools)
-            result = react_agent.invoke(
-                {"messages": [{"role": "user", "content": req.question}]},
-                config={"recursion_limit": 8},
-            )
+
+            def _tools(collected: List[Document]):
+                kw = dict(user_id=current_user.id, allowed_doc_ids=ctx.allowed_doc_ids,
+                          user_role=current_user.role, collected_docs=collected)
+                if "tenant_id" in _inspect.signature(build_agent_tools).parameters:
+                    kw["tenant_id"] = current_user.tenant_id
+                return build_agent_tools(**kw)
+
+            result, collected_docs, react_model = _react_run(ctx, req.question, _tools)
             final_msg = result["messages"][-1]
             answer_text = final_msg.content if hasattr(final_msg, "content") else str(final_msg)
             agent_used = "react_agent"
+            react_sources = [QuerySource(**s.model_dump()) for s in _sources_from_docs(collected_docs)]
 
-            react_sources: List[QuerySource] = []
-            seen_react: set = set()
-            for doc in collected_docs:
-                m = doc.metadata
-                key = (m.get("filename", "Unknown"), m.get("page", 0))
-                if key not in seen_react:
-                    seen_react.add(key)
-                    react_sources.append(QuerySource(
-                        document=m.get("filename", "Unknown Document"),
-                        page=m.get("page", 0) + 1,
-                        chunk_preview=doc.page_content[:120].strip() + "…",
-                    ))
-
-            # Always run verification and persist a record — even with zero
-            # collected_docs, "nothing was verifiable for this answer" is
-            # itself a real, honest fact worth persisting (same design
-            # decision as standard RAG's KB-fallback path — see
-            # Documents/AI/evidence-explorer.md Design Principle 1), not a
-            # reason to skip.
+            fin = rt.finish_agent_turn(ctx, _mod(), answer=answer_text, docs=collected_docs,
+                                       agent_label="react_agent")
+            react_ver, react_safe = fin["ver"], fin["safe"]
+            answer_text = fin["answer"]
             evidence_coverage, unsupported_count, contradicted_count, critique_passed = None, None, None, False
             from VENUAI import evidence_store
-            from VENUAI.answer_pipeline import run_verification, apply_output_safety, ANSWER_BASIS_DOCUMENTS, ANSWER_BASIS_NONE
-            react_ver = run_verification(answer_text, req.question, collected_docs, light=True)
-            react_safe = apply_output_safety(react_ver.pop("final_answer"), react_ver.get("grounding_score"), user_id=current_user.id)
-            answer_text = react_safe["answer"]
             try:
                 from VENUAI.verification_pipeline import get_verification_pipeline
                 pipeline_result = get_verification_pipeline().run(req.question, answer_text, collected_docs)
@@ -1387,11 +1632,10 @@ def query_knowledge_base(
                 contradicted_count = pipeline_result.critique.contradicted_claim_count
                 critique_passed = pipeline_result.critique.passed
                 background_tasks.add_task(
-                    evidence_store.save_record,
-                    current_user.id, current_user.tenant_id, req.question, answer_text, "react_agent",
+                    evidence_store.save_record, current_user.id, current_user.tenant_id, req.question,
+                    answer_text, "react_agent",
                     evidence_store.serialize_claims(pipeline_result.evidence_graph.claims),
-                    evidence_coverage, unsupported_count, contradicted_count, critique_passed,
-                )
+                    evidence_coverage, unsupported_count, contradicted_count, critique_passed)
             except Exception as verify_err:
                 logger.warning(f"[react_agent] VerificationPipeline skipped: {verify_err}")
 
@@ -1401,133 +1645,110 @@ def query_knowledge_base(
                     for tc in msg.tool_calls:
                         tools_called.append(tc.get("name", ""))
             t_end = _time.time()
-            background_tasks.add_task(
-                mm.save_turn, req.session_id, req.user_id or "anonymous",
-                req.question, answer_text
-            )
+            background_tasks.add_task(rt._call_mm, mm.save_turn, req.session_id, req.user_id or "anonymous",
+                                      req.question, answer_text, tenant_id=current_user.tenant_id)
             from VENUAI.analytics import get_analytics
             background_tasks.add_task(
-                get_analytics().log_query,
-                req.session_id, req.user_id or "anonymous", req.question,
-                len(answer_text), (t_end - t_start) * 1000,
-                react_ver.get("grounding_score") or 0.0, react_ver.get("hallucination_score") or 0.0,
-                agent_used, tools_called, None
-            )
+                get_analytics().log_query, req.session_id, req.user_id or "anonymous", req.question,
+                len(answer_text), (t_end - t_start) * 1000, react_ver.get("grounding_score") or 0.0,
+                react_ver.get("hallucination_score") or 0.0, agent_used, tools_called, None)
+            from VENUAI.answer_pipeline import ANSWER_BASIS_DOCUMENTS, ANSWER_BASIS_NONE
+            extras = {**fin["extras"], **_agent_extras(ctx, tools_called)}
             return QueryResponse(
-                answer=answer_text,
-                sources=react_sources,
-                model=f"{react_model} (ReAct)",
-                chunks_retrieved=len(collected_docs),
-                grounding_score=react_ver.get("grounding_score"),
+                answer=answer_text, sources=react_sources, model=f"{react_model} (ReAct)",
+                chunks_retrieved=len(collected_docs), grounding_score=react_ver.get("grounding_score"),
                 hallucination_score=react_ver.get("hallucination_score"),
-                verification_flags=react_ver.get("verification_flags", []),
-                annotated_answer=answer_text,
-                evidence_coverage=evidence_coverage,
-                unsupported_claim_count=unsupported_count,
-                contradicted_claim_count=contradicted_count,
-                critique_passed=critique_passed,
+                verification_flags=react_ver.get("verification_flags", []), annotated_answer=answer_text,
+                evidence_coverage=evidence_coverage, unsupported_claim_count=unsupported_count,
+                contradicted_claim_count=contradicted_count, critique_passed=critique_passed,
                 blocked=react_safe["blocked"], block_reason=react_safe["block_reason"],
                 verified=react_ver["verified"] and not react_safe["blocked"],
-                verification_reason=react_ver.get("verification_reason"),
-                safety_check=react_safe["safety_check"],
+                verification_reason=react_ver.get("verification_reason"), safety_check=react_safe["safety_check"],
                 answer_basis=ANSWER_BASIS_DOCUMENTS if collected_docs else ANSWER_BASIS_NONE,
-                trace_id=trace.request_id,
+                **extras,
             )
 
-        # Mode: Standard RAG (LangGraph)
-        final_state = venuai_graph.invoke({
-            "question":          req.question,
-            "top_k":             req.top_k,
-            "history":           effective_history,
-            "documents":         [],
-            "answer":            "",
-            "sources":           [],
-            "model_used":        "",
-            "working_memory":    working_memory,
-            "semantic_memories": semantic_memories,
-            "grounding_score":   None,
-            "hallucination_score": None,
-            "verification_flags":  [],
-            "annotated_answer":    "",
-            "allowed_doc_ids":     get_visible_doc_ids(current_user),
-            "evidence_coverage":   None,
-            "unsupported_claim_count": None,
-            "contradicted_claim_count": None,
-            "critique_passed":     False,
-            "evidence_claims":     [],
-            "retrieval_query":     req.question,
-            "retrieval_scores":    [],
-            "insufficient_context": False,
-            "user_id":             current_user.id,
-        })
-        t_end = _time.time()
-        final_answer = final_state.get("answer", "No response generated.")
+        # Mode: Standard RAG - cache -> LangGraph first pass -> capped corrective loop -> shared tail
+        cached = rt.cache_lookup(ctx)
+        if cached is not None:
+            t_end = _time.time()
+            ctx.cache_hit = True
+            extras = rt.turn_extras(ctx, [], cached.get("answer", ""), cached.get("followups"), None)
+            extras["retrieved_chunks"] = cached.get("retrieved_chunks", [])
+            extras["model_path"] = cached.get("model_path_original", [])
+            extras["usage"] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            extras["corrective"] = cached.get("corrective") or {"iterations": 0, "actions": []}
+            extras["memories_used"] = []
+            extras["contradictions"] = cached.get("contradictions", [])
+            trace.log_summary(success=True, extra={"stage": "cache_hit"})
+            return _to_response({**cached, **extras})
 
-        background_tasks.add_task(
-            mm.save_turn, req.session_id, req.user_id or "anonymous",
-            req.question, final_answer
-        )
+        base = _initial_state(ctx, mem_ctx, current_user)
+        first = venuai_graph.invoke(dict(base))
+        if first.get("model_used") and not str(first["model_used"]).startswith("retrieval-abstain"):
+            ctx.note_model(first.get("model_used"))
+        result = _corrective_and_finish(ctx, base, first)
+        t_end = _time.time()
+        final_answer = result.get("answer", "No response generated.")
+
+        background_tasks.add_task(rt._call_mm, mm.save_turn, req.session_id, req.user_id or "anonymous",
+                                  req.question, final_answer, tenant_id=current_user.tenant_id)
         from VENUAI.evidence_store import save_record as _save_evidence_record
         background_tasks.add_task(
-            _save_evidence_record,
-            current_user.id, current_user.tenant_id, req.question, final_answer, "query",
-            final_state.get("evidence_claims", []), final_state.get("evidence_coverage") or 0.0,
-            final_state.get("unsupported_claim_count") or 0, final_state.get("contradicted_claim_count") or 0,
-            final_state.get("critique_passed", False),
-        )
+            _save_evidence_record, current_user.id, current_user.tenant_id, req.question, final_answer, "query",
+            result.get("evidence_claims", []), result.get("evidence_coverage") or 0.0,
+            result.get("unsupported_claim_count") or 0, result.get("contradicted_claim_count") or 0,
+            result.get("critique_passed", False))
         from VENUAI.analytics import get_analytics
         background_tasks.add_task(
-            get_analytics().log_query,
-            req.session_id, req.user_id or "anonymous", req.question,
-            len(final_answer), (t_end - t_start) * 1000,
-            final_state.get("grounding_score") or 0.0,
-            final_state.get("hallucination_score") or 0.0,
-            agent_used, tools_called, error_str
-        )
-
+            get_analytics().log_query, req.session_id, req.user_id or "anonymous", req.question,
+            len(final_answer), (t_end - t_start) * 1000, result.get("grounding_score") or 0.0,
+            result.get("hallucination_score") or 0.0, agent_used, tools_called, error_str)
         trace.log_summary(success=True, extra={
-            "stage": "standard_rag", "chunks_retrieved": len(final_state.get("documents", [])),
-            "grounding_score": final_state.get("grounding_score", 0.0),
-            "critique_passed": final_state.get("critique_passed", False),
-        })
-        return QueryResponse(
-            answer=final_answer,
-            sources=final_state.get("sources", []),
-            model=final_state.get("model_used", "LangGraph Workflow"),
-            chunks_retrieved=len(final_state.get("documents", [])),
-            grounding_score=final_state.get("grounding_score"),
-            hallucination_score=final_state.get("hallucination_score"),
-            verification_flags=final_state.get("verification_flags", []),
-            annotated_answer=final_state.get("annotated_answer") or final_answer,
-            evidence_coverage=final_state.get("evidence_coverage"),
-            unsupported_claim_count=final_state.get("unsupported_claim_count"),
-            contradicted_claim_count=final_state.get("contradicted_claim_count"),
-            critique_passed=final_state.get("critique_passed", False),
-            blocked=final_state.get("blocked", False),
-            block_reason=final_state.get("block_reason"),
-            verified=final_state.get("verified", False),
-            verification_reason=final_state.get("verification_reason"),
-            citations=final_state.get("citations", []),
-            safety_check=final_state.get("safety_check"),
-            answer_basis=final_state.get("answer_basis"),
-            answer_basis_notice=(_kb_notice() if final_state.get("answer_basis") == "builtin_knowledge_base" else None),
-            quarantined_chunks=final_state.get("quarantined", 0),
-            trace_id=trace.request_id,
-        )
+            "stage": "standard_rag", "chunks_retrieved": len(result.get("documents", [])),
+            "grounding_score": result.get("grounding_score", 0.0),
+            "critique_passed": result.get("critique_passed", False),
+            "corrective": result.get("corrective")})
+        return _to_response(result)
 
     except HTTPException:
         raise
     except Exception as e:
         # Error hygiene: full detail is logged server-side under a trace id; the client gets a
         # generic message plus that id (never str(e)).
+        from VENUAI.ai_gateway.usage import BudgetExceeded
         trace.log_summary(success=False, extra={"stage": "exception", "error_type": type(e).__name__})
         error_str = type(e).__name__
         logger.exception(f"Query execution error [trace_id={trace.request_id}]")
+        if isinstance(e, BudgetExceeded):
+            raise HTTPException(status_code=429, detail="This request exceeded its token budget "
+                                f"(REQUEST_TOKEN_BUDGET). Reference trace ID: {trace.request_id}",
+                                headers={"X-Trace-Id": trace.request_id})
         raise HTTPException(
             status_code=500,
             detail=f"Query execution failed. Reference trace ID: {trace.request_id}",
             headers={"X-Trace-Id": trace.request_id},
         )
+
+
+class ResumeRequest(BaseModel):
+    approval_id: str
+
+
+@app.post("/query/resume")
+def resume_query(req: ResumeRequest, current_user: AuthenticatedUser = Depends(get_current_user)):
+    """Continue a run that stopped at `pending_approval`. Delegates to approvals.resume
+    (stream B3); 503 when the approvals module is not installed."""
+    try:
+        from VENUAI import approvals
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Approvals are not available on this deployment.")
+    if not hasattr(approvals, "resume"):
+        raise HTTPException(status_code=503, detail="Approvals are not available on this deployment.")
+    out = approvals.resume(req.approval_id, current_user)
+    if hasattr(out, "model_dump"):
+        return out.model_dump()
+    return out
 
 
 @app.post("/query/stream")
@@ -1537,18 +1758,26 @@ async def query_stream(
     req: QueryRequest,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Stream LLM tokens via Server-Sent Events."""
+    """
+    Stream a RAG answer via Server-Sent Events. Lines are JSON `data:` events:
+      {"step": {id,status,label,t_ms,detail}}   typed pipeline steps (see Documents/AI/pipeline.md)
+      {"model": "..."}                          model that started answering
+      {"token": "..."}                          visible answer text
+      {"done": true, ...}                       final event: answer (replaces streamed text) + every
+                                                /query field (citations, scores, usage, followups, ...)
+    """
     import asyncio
+    import contextvars
+    import queue as _queue
+    import threading
     from fastapi.responses import StreamingResponse
-    from VENUAI.context_engineer import ContextBudget, rank_chunks, compress_history, build_drdo_prompt
-    from VENUAI.memory_manager import get_memory_manager
+    from VENUAI import run_turn as rt
 
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
     req.user_id = current_user.id
 
-    # Input guardrails (same engine as /query). A block emits ONE SSE event and ends.
     from VENUAI.guardrails import get_guardrail_engine
     from VENUAI.observability import new_request_id
     trace_id = new_request_id()
@@ -1557,18 +1786,14 @@ async def query_stream(
     )
     if not g_res.passed:
         blocked_event = {
-            "blocked": True,
-            "block_reason": g_res.block_reason or g_res.violation_type,
-            "violation_type": g_res.violation_type,
-            "answer": g_res.sanitized_input_or_output,
-            "done": True,
-            "sources": [],
-            "citations": [],
-            "grounding_score": None,
-            "hallucination_score": None,
-            "verified": False,
-            "verification_reason": "request blocked by input guardrails",
-            "trace_id": trace_id,
+            "blocked": True, "block_reason": g_res.block_reason or g_res.violation_type,
+            "violation_type": g_res.violation_type, "answer": g_res.sanitized_input_or_output,
+            "done": True, "sources": [], "citations": [], "grounding_score": None,
+            "hallucination_score": None, "verified": False,
+            "verification_reason": "request blocked by input guardrails", "trace_id": trace_id,
+            "retrieved_chunks": [], "usage": None, "ttft_ms": None, "latency_ms": 0, "cache_hit": False,
+            "model_path": [], "followups": [], "contradictions": [], "corrective": None,
+            "memories_used": [], "pending_approval": None,
         }
 
         async def blocked_generator():
@@ -1579,138 +1804,145 @@ async def query_stream(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Trace-Id": trace_id},
         )
 
-    async def event_generator():
-        try:
-            mm = get_memory_manager()
-            mem_ctx = mm.get_context(req.session_id, req.user_id or "anonymous", req.question)
-            effective_history = req.history or mem_ctx.get("working", [])
+    events: "_queue.Queue" = _queue.Queue()
+    sink = rt.StepSink(events)
+    visible_ids = get_visible_doc_ids(current_user)
 
-            allowed_doc_ids = get_visible_doc_ids(current_user)
-            insufficient = False
-            docs = []
-            if load_metadata():
-                # Same shared pipeline as /query (rewrite -> dense+BM25 -> RRF -> rerank ->
-                # relevance floor, multimodal regions included); runs in a worker thread.
-                from VENUAI.retrieval import retrieve_documents
-                _hist = effective_history
-                ret = await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: retrieve_documents(
-                        get_vector_store(), req.question, req.top_k, allowed_doc_ids, history=_hist,
-                    )
-                )
-                docs = ret.documents
-                insufficient = ret.insufficient_context
-            if insufficient:
-                done_event = {
-                    "done": True, "sources": [], "answer": ABSTAIN_ANSWER, "citations": [],
-                    "grounding_score": None, "hallucination_score": None,
-                    "verification_flags": ["INSUFFICIENT_CONTEXT"],
-                    "verified": False, "verification_reason": "insufficient_context",
-                    "evidence_coverage": None, "unsupported_claim_count": None,
-                    "contradicted_claim_count": None, "critique_passed": False,
-                    "safety_check": None, "blocked": False, "block_reason": None,
-                    "answer_basis": "none", "answer_basis_notice": None,
-                    "quarantined_chunks": 0, "insufficient_context": True,
-                    "model": "retrieval-abstain (no LLM call)", "trace_id": trace_id,
-                }
-                yield f'data: {json.dumps({"model": done_event["model"]})}\n\n'
-                yield f"data: {json.dumps(done_event)}\n\n"
+    def worker():
+        from VENUAI import followups as _fu
+        from VENUAI.grounded_citations import CitationStreamFilter
+        from VENUAI.ai_gateway.gateway import get_gateway
+        from VENUAI.ai_gateway.model_router import TaskType as _StreamTT
+        try:
+            from VENUAI.memory_manager import get_memory_manager
+            mm = get_memory_manager()
+            mem_ctx = rt._call_mm(mm.get_context, req.session_id, req.user_id or "anonymous", req.question,
+                                  tenant_id=current_user.tenant_id)
+            try:
+                ctx = rt.begin_turn(
+                    req.question, current_user, session_id=req.session_id, top_k=req.top_k,
+                    history=req.history or mem_ctx.get("working", []), visible_doc_ids=visible_ids,
+                    requested_doc_ids=req.doc_ids, depth=req.depth, mode="rag", trace_id=trace_id, sink=sink)
+            except rt.BudgetRefused as refused:
+                events.put({"error": str(refused), "trace_id": trace_id, "budget_exhausted": True})
                 return
 
-            ranked_docs = rank_chunks(docs, req.question)
-            answer_basis = "uploaded_documents" if ranked_docs else "none"
-            if not ranked_docs:
-                ranked_docs = _kb_fallback_docs()
-                if ranked_docs:
-                    answer_basis = "builtin_knowledge_base"
+            cached = rt.cache_lookup(ctx)
+            if cached is not None:
+                events.put({"model": "answer-cache"})
+                if cached.get("answer"):
+                    events.put({"token": cached["answer"]})
+                extras = rt.turn_extras(ctx, [], cached.get("answer", ""), cached.get("followups"), None)
+                done = {**cached, **extras, "done": True, "cache_hit": True,
+                        "retrieved_chunks": cached.get("retrieved_chunks", []),
+                        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                        "model_path": cached.get("model_path_original", []), "memories_used": []}
+                events.put(_done_event(done))
+                return
 
-            prompt_info: dict = {}
-            prompt_text = build_drdo_prompt(
-                question=req.question,
-                ranked_docs=ranked_docs,
-                compressed_history=compress_history(effective_history),
-                budget=ContextBudget(),
-                semantic_memories=mem_ctx.get("semantic", []),
-                info=prompt_info,
-            )
-            prompt_docs = prompt_info.get("used_docs", [])
-            from VENUAI.grounded_citations import CitationStreamFilter
-            cite_filter = CitationStreamFilter()
+            base = _initial_state(ctx, mem_ctx, current_user)
+            state = dict(base)
+            if load_metadata():
+                ctx.sink.emit("retrieving", "start", "Searching your documents")
+                state.update(retrieve_node(state))
+                n = len(state.get("documents", []))
+                ctx.sink.emit("retrieving", "end", f"Found {n} passages", n=n,
+                              retriever="hybrid", rewritten=state.get("retrieval_query") != req.question)
+                if state.get("insufficient_context"):
+                    ab = abstain_node(state)
+                    first = {**state, **ab}
+                    events.put({"model": ab["model_used"]})
+                    result = _corrective_and_finish(ctx, base, first)
+                    events.put(_done_event(result))
+                    return
 
-            from VENUAI.ai_gateway.gateway import get_gateway
-            from VENUAI.ai_gateway.model_router import TaskType as _StreamTT
-            full_answer = ""
-            # Gateway streaming: fallback chain + circuit breaker before the
-            # first token; sync Groq iteration runs in worker threads.
-            gw_stream = await get_gateway().astream(
-                _StreamTT.GENERATION,
-                messages=[{"role": "user", "content": prompt_text}],
-                max_tokens=1500,
-                temperature=0.2,
-            )
-            stream_model_used = gw_stream.model_used
-            yield f'data: {{"model": {json.dumps(stream_model_used)}}}\n\n'
-            async for delta in gw_stream:
+            ctx.sink.emit("reading", "start", "Reading the most relevant passages")
+            prompt_text, prompt_docs, answer_basis, pinfo = _build_generation_prompt(state)
+            ctx.sink.emit("reading", "end", f"Using {len(prompt_docs)} passages", n=len(prompt_docs))
+
+            ctx.sink.emit("generating", "start", "Writing the answer")
+            cite_filter, fu_filter = CitationStreamFilter(), _fu.FollowupStreamFilter()
+            hint = state.get("model_hint") or {}
+            gw_stream = get_gateway().stream(
+                _StreamTT.GENERATION, messages=[{"role": "user", "content": prompt_text}],
+                max_tokens=1500, temperature=0.2,
+                prefer_model=hint.get("prefer_model"), reasoning_effort=hint.get("effort"))
+            ctx.note_model(gw_stream.model_used)
+            events.put({"model": gw_stream.model_used})
+            full = ""
+            for delta in gw_stream:
                 if delta:
-                    full_answer += delta
-                    visible = cite_filter.feed(delta)   # hides the trailing <citations> block
-                    if visible:
-                        yield f'data: {{"token": {json.dumps(visible)}}}\n\n'
-            tail = cite_filter.flush()
+                    full += delta
+                    vis = cite_filter.feed(fu_filter.feed(delta))
+                    if vis:
+                        events.put({"token": vis})
+            tail = cite_filter.feed(fu_filter.flush()) + cite_filter.flush()
             if tail:
-                yield f'data: {{"token": {json.dumps(tail)}}}\n\n'
+                events.put({"token": tail})
+            ctx.sink.emit("generating", "end", "", model=gw_stream.model_used,
+                          ttft_ms=int(gw_stream.ttft_ms) if gw_stream.ttft_ms is not None else None)
 
-            sources_list = [
-                {"document": q.document, "page": q.page, "chunk_preview": q.chunk_preview}
-                for q in _sources_from_docs(prompt_docs)
-            ]
-
-            # Real verification after the final chunk (no hardcoded score): citations, grounding,
-            # output guardrails. Runs in a worker thread (blocking LLM/NLI calls).
-            post = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: _postprocess_answer(
-                    full_answer, req.question, prompt_docs, req.user_id or "user", answer_basis,
-                )
-            )
-            done_event = {
-                "done": True,
-                "sources": sources_list,
-                "answer": post["answer"],            # final, citation-block-free (replaces streamed text)
-                "citations": post["citations"],
-                "grounding_score": post.get("grounding_score"),
-                "hallucination_score": post.get("hallucination_score"),
-                "verification_flags": post.get("verification_flags", []),
-                "verified": post.get("verified", False),
-                "verification_reason": post.get("verification_reason"),
-                "evidence_coverage": post.get("evidence_coverage"),
-                "unsupported_claim_count": post.get("unsupported_claim_count"),
-                "contradicted_claim_count": post.get("contradicted_claim_count"),
-                "critique_passed": post.get("critique_passed", False),
-                "safety_check": post.get("safety_check"),
-                "blocked": post.get("blocked", False),
-                "block_reason": post.get("block_reason"),
-                "answer_basis": answer_basis,
-                "answer_basis_notice": _kb_notice() if answer_basis == "builtin_knowledge_base" else None,
-                "quarantined_chunks": prompt_info.get("quarantined", 0),
-                "trace_id": trace_id,
-            }
-            yield f"data: {json.dumps(done_event)}\n\n"
-
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: mm.save_turn(
-                    req.session_id, req.user_id or "anonymous", req.question, post["answer"]
-                )
-            )
+            ctx.sink.emit("verifying", "start", "Verifying the answer against the sources")
+            gen = {"answer": full, "sources": _sources_from_docs(prompt_docs), "documents": prompt_docs,
+                   "prompt_docs": prompt_docs, "quarantined": pinfo.get("quarantined", 0),
+                   "answer_basis": answer_basis, "model_used": gw_stream.model_used}
+            ver = verify_node({**state, **gen})
+            ctx.sink.emit("verifying", "end", "", verified=bool(ver.get("verified")))
+            first = {**state, **gen, **ver}
+            result = _corrective_and_finish(ctx, base, first)
+            events.put(_done_event(result))
+            rt._call_mm(mm.save_turn, req.session_id, req.user_id or "anonymous", req.question,
+                        result.get("answer", ""), tenant_id=current_user.tenant_id)
         except Exception as e:
             # Error hygiene: detail goes to the log under the trace id, not to the client.
             logger.exception(f"[stream] error [trace_id={trace_id}]")
-            yield f"data: {json.dumps({'error': f'Stream failed. Reference trace ID: {trace_id}', 'trace_id': trace_id})}\n\n"
+            from VENUAI.ai_gateway.usage import BudgetExceeded
+            msg = ("Token budget for this request was exceeded." if isinstance(e, BudgetExceeded)
+                   else "Stream failed.")
+            events.put({"error": f"{msg} Reference trace ID: {trace_id}", "trace_id": trace_id})
+        finally:
+            events.put(None)
+
+    ctx_copy = contextvars.copy_context()
+    threading.Thread(target=lambda: ctx_copy.run(worker), daemon=True, name="query-stream").start()
+
+    async def event_generator():
+        loop = asyncio.get_running_loop()
+        while True:
+            item = await loop.run_in_executor(None, events.get)
+            if item is None:
+                break
+            yield f"data: {json.dumps(item, default=str)}\n\n"
 
     return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
+        event_generator(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Trace-Id": trace_id},
     )
+
+
+_DONE_KEYS = (
+    "sources", "citations", "grounding_score", "hallucination_score", "verification_flags", "verified",
+    "verification_reason", "evidence_coverage", "unsupported_claim_count", "contradicted_claim_count",
+    "critique_passed", "safety_check", "blocked", "block_reason", "answer_basis", "quarantined_chunks",
+    "insufficient_context", "retrieved_chunks", "usage", "ttft_ms", "latency_ms", "cache_hit", "model_path",
+    "followups", "contradictions", "corrective", "trace_id", "memories_used", "pending_approval",
+)
+
+
+def _done_event(result: dict) -> dict:
+    ev = {"done": True, "answer": result.get("answer", "")}
+    for k in _DONE_KEYS:
+        v = result.get(k)
+        if k == "sources":
+            v = [s.model_dump() if hasattr(s, "model_dump") else s for s in (v or [])]
+        if k == "quarantined_chunks":
+            v = result.get("quarantined", v) or 0
+        ev[k] = v
+    ev["answer_basis_notice"] = _kb_notice() if result.get("answer_basis") == "builtin_knowledge_base" else None
+    ev["model"] = result.get("model_used") or result.get("model")
+    if ev.get("insufficient_context") is None:
+        ev.pop("insufficient_context")
+    return ev
 
 
 class ResearchRequest(BaseModel):
@@ -1775,9 +2007,16 @@ def run_deep_research(
     research_id = uuid.uuid4().hex[:12]
     allowed_doc_ids = get_visible_doc_ids(current_user)
 
-    result = DeepResearchAgent().research(
-        req.question, get_groq_client(), allowed_doc_ids=allowed_doc_ids
-    )
+    try:   # stream B4: job-based engine run synchronously; same result shape
+        from VENUAI.research_jobs import run_research_sync
+        result = run_research_sync(
+            req.question, user_id=current_user.id, tenant_id=current_user.tenant_id,
+            allowed_doc_ids=allowed_doc_ids, depth="quick",
+        )
+    except ImportError:
+        result = DeepResearchAgent().research(
+            req.question, get_groq_client(), allowed_doc_ids=allowed_doc_ids
+        )
 
     # Output guardrails + policy classifier on the synthesized answer (frozen dataclass -> replace).
     import dataclasses
@@ -1902,7 +2141,13 @@ def delete_document(doc_id: str, current_user: AuthenticatedUser = Depends(get_c
     vs = get_vector_store()
     vs._collection.delete(where={"doc_id": doc_id})
     from VENUAI.retrieval import bump_corpus_version
-    bump_corpus_version()
+    bump_corpus_version(current_user.tenant_id)
+    try:
+        from VENUAI import raptor
+        if hasattr(raptor, "delete_summaries"):
+            raptor.delete_summaries(doc_id, current_user.tenant_id)
+    except Exception as err:  # noqa: BLE001
+        logger.debug(f"raptor summary cleanup skipped: {err}")
     vs.persist()
     file_path = Path(doc_info.get("file_path", ""))
     if file_path.exists():

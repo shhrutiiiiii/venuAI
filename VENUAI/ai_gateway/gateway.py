@@ -102,6 +102,18 @@ class AIGateway:
         }
         self._breaker = _CircuitBreaker()
 
+    # Public circuit-breaker access for callers that drive a model themselves (ReAct).
+    def breaker_open(self, model_id: str) -> bool:
+        return self._breaker.is_open(model_id)
+
+    def breaker_record(self, model_id: str, ok: bool) -> None:
+        (self._breaker.record_success if ok else self._breaker.record_failure)(model_id)
+
+    def breaker_states(self) -> Dict[str, dict]:
+        now = time.time()
+        return {m: {"open": now < st.opened_until, "consecutive_failures": st.consecutive_failures}
+                for m, st in self._breaker._state.items()}
+
     def complete(
         self,
         task_type: TaskType,

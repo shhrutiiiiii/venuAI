@@ -170,7 +170,7 @@ def run_verification(answer: str, question: str, docs: List[Document], light: bo
                 if v.revised_answer:
                     final_answer = v.revised_answer
             annotated, hall_score, hclaims = f_hal.result()
-            if final_answer != answer:  # re-anchor annotations on the revised text
+            if final_answer != answer and hclaims:  # re-anchor annotations on the revised text
                 from VENUAI.hallucination_detector import get_hallucination_detector
                 annotated = get_hallucination_detector().annotate_answer(final_answer, hclaims)
             out.update({
