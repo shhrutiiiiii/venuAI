@@ -407,7 +407,7 @@ def test_seed_demo_user_env_flag(monkeypatch):
     assert created == []
     monkeypatch.setenv("SEED_DEMO_USER", "true")
     auth.seed_demo_users()
-    assert created == ["demo@chat.com", "admin@chat.com"]
+    assert created == ["demo@chat.com"]  # no admin is ever seeded (S1)
 
 
 def test_stream_abstains_when_retrieval_insufficient(client, auth_headers, monkeypatch):
