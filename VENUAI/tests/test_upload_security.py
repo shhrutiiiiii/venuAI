@@ -18,6 +18,15 @@ from VENUAI.upload_security import (
 )
 
 
+def _real_pdf() -> bytes:
+    from pypdf import PdfWriter
+    w = PdfWriter()
+    w.add_blank_page(width=100, height=100)
+    b = io.BytesIO()
+    w.write(b)
+    return b.getvalue()
+
+
 def _make_upload(filename: str, content: bytes) -> UploadFile:
     return UploadFile(
         filename=filename,
@@ -28,7 +37,7 @@ def _make_upload(filename: str, content: bytes) -> UploadFile:
 
 @pytest.mark.asyncio
 async def test_valid_pdf_is_accepted():
-    f = _make_upload("report.pdf", b"%PDF-1.4" + b"0" * 100 + b"\n%%EOF\n")
+    f = _make_upload("report.pdf", _real_pdf())
     content = await validate_upload(f)
     assert content.startswith(b"%PDF-")
 
