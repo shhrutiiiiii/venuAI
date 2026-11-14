@@ -47,34 +47,7 @@ logger = logging.getLogger("drdo-rag")
 # regardless of the process's current working directory.
 load_dotenv(Path(__file__).parent / ".env")
 
-_WEAK_SECRET_MARKERS = ("changeme", "generate", "your-secret", "your_secret", "placeholder", "example")
-_WEAK_SECRETS = {"secret", "password", "default", "jwt_secret", "jwtsecret", "test", "dev"}
-
-
-def validate_jwt_secret(secret: Optional[str]) -> str:
-    """Return the stripped secret or raise RuntimeError. The server refuses to
-    boot with a missing, short (<32 bytes), placeholder or low-entropy secret."""
-    s = (secret or "").strip()
-    if not s:
-        raise RuntimeError(
-            "JWT_SECRET_KEY not set. Generate one with `python -c \"import secrets; "
-            "print(secrets.token_urlsafe(48))\"` and put it in your .env — the "
-            "server refuses to start with an insecure/default secret."
-        )
-    low = s.lower()
-    if (
-        len(s.encode()) < 32
-        or low.startswith("<")
-        or low in _WEAK_SECRETS
-        or any(m in low for m in _WEAK_SECRET_MARKERS)
-        or len(set(s)) < 8
-    ):
-        raise RuntimeError(
-            "JWT_SECRET_KEY is weak or a placeholder (need >= 32 bytes of real randomness). "
-            "Generate one with `python -c \"import secrets; print(secrets.token_urlsafe(48))\"`."
-        )
-    return s
-
+from VENUAI.secret_policy import validate_jwt_secret  # noqa: E402  (single secret policy; see secret_policy.py)
 
 JWT_SECRET_KEY = validate_jwt_secret(os.getenv("JWT_SECRET_KEY"))
 JWT_ALGORITHM = "HS256"
@@ -234,16 +207,23 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS tenant_invites (
                 token_hash TEXT PRIMARY KEY,
+                id         TEXT,
                 tenant_id  TEXT NOT NULL,
                 role       TEXT NOT NULL DEFAULT 'user',
                 email      TEXT,
                 created_by TEXT,
                 expires_at REAL NOT NULL,
                 used_at    REAL,
+                used_by    TEXT,
+                revoked    INTEGER NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL
             )
             """
         )
+        _inv_cols = {r[1] for r in conn.execute("PRAGMA table_info(tenant_invites)")}
+        for _col, _ddl in (("id", "TEXT"), ("used_by", "TEXT"), ("revoked", "INTEGER NOT NULL DEFAULT 0")):
+            if _col not in _inv_cols:
+                conn.execute(f"ALTER TABLE tenant_invites ADD COLUMN {_col} {_ddl}")
         conn.execute(
             "INSERT OR IGNORE INTO tenants (tenant_id, name, created_at) VALUES ('default', 'Default Organization', ?)",
             (time.time(),),
@@ -616,37 +596,51 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def create_invite_record(
+    tenant_id: str, created_by: Optional[str] = None, role: str = "user",
+    email: Optional[str] = None, ttl_seconds: int = INVITE_TTL_SECONDS,
+) -> dict:
+    """The one invite implementation. Mint a single-use invite and return
+    {id, token, tenant_id, role, email, expires_at}; only the token's hash is stored."""
+    if role not in VALID_ROLES:
+        raise ValueError("invalid role")
+    raw = secrets.token_urlsafe(32)
+    invite_id = secrets.token_hex(8)
+    now = time.time()
+    with _get_conn() as conn:
+        conn.execute(
+            "INSERT INTO tenant_invites (token_hash, id, tenant_id, role, email, created_by, expires_at, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (_hash_token(raw), invite_id, tenant_id, role, email.lower() if email else None, created_by,
+             now + ttl_seconds, now),
+        )
+        conn.commit()
+    return {"id": invite_id, "token": raw, "tenant_id": tenant_id, "role": role,
+            "email": email.lower() if email else None, "expires_at": now + ttl_seconds}
+
+
 def create_invite(
     tenant_id: str, created_by: Optional[str] = None, role: str = "user",
     email: Optional[str] = None, ttl_seconds: int = INVITE_TTL_SECONDS,
 ) -> str:
-    """Mint a single-use invite for `tenant_id` and return the raw token (shown
-    once; only its hash is stored). Called by the admin invite route (S2)."""
+    """Raw single-use token (shown once)."""
     if role not in VALID_ROLES:
         role = "user"
-    raw = secrets.token_urlsafe(32)
-    with _get_conn() as conn:
-        conn.execute(
-            "INSERT INTO tenant_invites (token_hash, tenant_id, role, email, created_by, expires_at, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (_hash_token(raw), tenant_id, role, email.lower() if email else None, created_by,
-             time.time() + ttl_seconds, time.time()),
-        )
-        conn.commit()
-    return raw
+    return create_invite_record(tenant_id, created_by, role, email, ttl_seconds)["token"]
 
 
-def _consume_invite(raw: str, email: str) -> Optional[sqlite3.Row]:
+def _consume_invite(raw: str, email: Optional[str] = None) -> Optional[sqlite3.Row]:
     """Atomically mark an invite used. None if unknown/expired/used/email-mismatch."""
     h = _hash_token(raw)
     with _get_conn() as conn:
         row = conn.execute("SELECT * FROM tenant_invites WHERE token_hash = ?", (h,)).fetchone()
-        if row is None or row["used_at"] is not None or row["expires_at"] < time.time():
+        if row is None or row["revoked"] or row["used_at"] is not None or row["expires_at"] < time.time():
             return None
-        if row["email"] and row["email"] != email.lower():
+        if row["email"] and (not email or row["email"] != email.lower()):
             return None
         cur = conn.execute(
-            "UPDATE tenant_invites SET used_at = ? WHERE token_hash = ? AND used_at IS NULL", (time.time(), h)
+            "UPDATE tenant_invites SET used_at = ?, used_by = ? WHERE token_hash = ? AND used_at IS NULL AND revoked = 0",
+            (time.time(), email.lower() if email else None, h)
         )
         conn.commit()
         return row if cur.rowcount == 1 else None
@@ -683,7 +677,8 @@ def register_user(
         return user
 
     name = organization_name or f"{email.split('@')[0]}'s workspace"
-    user = create_user(email, password, role="user", organization_name=name)
+    # The creator of a new organisation administers it (tenant admin of their own tenant only).
+    user = create_user(email, password, role="admin", organization_name=name)
     security_audit.log("register", user.id, user.tenant_id, ip)
     return user
 
@@ -778,7 +773,7 @@ def verify_password_reset_token(token: str) -> Optional[str]:
     """Non-consuming check: user_id if the token is currently valid, else None."""
     with _get_conn() as conn:
         row = conn.execute("SELECT * FROM password_reset_tokens WHERE token_hash = ?", (_hash_token(token),)).fetchone()
-    if row is None or row["used_at"] is not None or row["expires_at"] < time.time():
+    if row is None or row["revoked"] or row["used_at"] is not None or row["expires_at"] < time.time():
         return None
     user = get_user_by_id(row["user_id"])
     if user is None or _pw_fingerprint(user["hashed_password"]) != row["pw_fingerprint"]:

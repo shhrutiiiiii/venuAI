@@ -65,7 +65,7 @@ def _is_trusted_peer(peer: str, trusted: List[str]) -> bool:
     return False
 
 
-def client_ip(request: Request) -> str:
+def trusted_proxy_client_ip(request: Request) -> str:
     """Peer IP, or - only when the immediate peer is a configured TRUSTED_PROXY -
     the right-most X-Forwarded-For entry that is not itself a trusted proxy.
     A client-supplied X-Forwarded-For is ignored unless it arrives via a trusted hop."""
@@ -88,6 +88,13 @@ def client_ip(request: Request) -> str:
         return real
     except ValueError:
         return peer
+
+
+def client_ip(request: Request) -> str:
+    """The single client-IP resolver (limiter keys, audit, lockout): S1's shared-secret proxy
+    header first, then TRUSTED_PROXY peer semantics."""
+    from VENUAI.client_ip import trusted_client_ip
+    return trusted_client_ip(request)
 
 
 def authenticated_user_id(request: Request) -> Optional[str]:

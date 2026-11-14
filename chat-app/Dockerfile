@@ -9,7 +9,7 @@ RUN npm ci
 
 FROM ${NODE_IMAGE} AS builder
 WORKDIR /app
-ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED=1 NEXT_OUTPUT=standalone
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
@@ -21,7 +21,7 @@ RUN apk add --no-cache tini \
     && addgroup -g 10001 -S nodejs && adduser -S nextjs -u 10001 -G nodejs
 
 COPY --from=builder /app/public ./public
-# Requires `output: "standalone"` in next.config.ts (S4 owns that file). When it is
+# Requires `output: "standalone"` in next.config.ts (next.config.ts enables it when NEXT_OUTPUT=standalone, set above in the builder stage). When it is
 # absent .next/standalone does not exist and this stage falls back to `next start`.
 COPY --from=builder --chown=10001:10001 /app/.next ./.next
 COPY --from=builder /app/node_modules ./node_modules

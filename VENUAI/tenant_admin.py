@@ -34,74 +34,25 @@ _ready_for: Optional[str] = None
 
 
 def _conn() -> sqlite3.Connection:
-    global _ready_for
-    c = auth._get_conn()
-    if _ready_for != str(auth.DB_PATH):
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS tenant_invites (
-                id          TEXT PRIMARY KEY,
-                tenant_id   TEXT NOT NULL,
-                token_hash  TEXT NOT NULL UNIQUE,
-                role        TEXT NOT NULL DEFAULT 'user',
-                email       TEXT,
-                created_by  TEXT NOT NULL,
-                created_at  REAL NOT NULL,
-                expires_at  REAL NOT NULL,
-                used_at     REAL,
-                used_by     TEXT,
-                revoked     INTEGER NOT NULL DEFAULT 0
-            )""")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_invites_tenant ON tenant_invites(tenant_id)")
-        c.commit()
-        _ready_for = str(auth.DB_PATH)
-    return c
+    """Same DB/table as S1's registration flow (auth.tenant_invites): one invite implementation."""
+    return auth._get_conn()
 
 
-def _hash(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-# ── invite primitives (also the interface S1 consumes) ───────────────────────
+# ── invite primitives: thin wrappers over auth (single implementation) ───────
 
 def create_invite(tenant_id: str, created_by: str, role: str = "user", email: Optional[str] = None,
                   ttl_hours: int = DEFAULT_INVITE_TTL_HOURS) -> dict:
-    if role not in auth.VALID_ROLES:
-        raise ValueError("invalid role")
     ttl_hours = max(1, min(int(ttl_hours), MAX_INVITE_TTL_HOURS))
-    token = secrets.token_urlsafe(32)
-    invite_id = secrets.token_hex(8)
-    now = time.time()
-    with _conn() as c:
-        c.execute(
-            "INSERT INTO tenant_invites (id, tenant_id, token_hash, role, email, created_by, created_at, expires_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (invite_id, tenant_id, _hash(token), role, email.lower() if email else None, created_by,
-             now, now + ttl_hours * 3600))
-        c.commit()
-    return {"id": invite_id, "token": token, "tenant_id": tenant_id, "role": role,
-            "email": email.lower() if email else None, "expires_at": now + ttl_hours * 3600}
+    return auth.create_invite_record(tenant_id, created_by, role, email, ttl_hours * 3600)
 
 
 def consume_invite(token: str, email: Optional[str] = None) -> Optional[dict]:
-    """Atomically redeem an invite. Returns {"invite_id","tenant_id","role"} or
-    None when the token is unknown / expired / used / revoked / bound to a
-    different email. Single use: the UPDATE only matches an unused row."""
+    """Redeem an invite via auth._consume_invite. None when unknown/expired/used/revoked/email-mismatch."""
     if not token or not isinstance(token, str) or len(token) > 256:
         return None
-    th = _hash(token)
-    now = time.time()
-    with _conn() as c:
-        row = c.execute("SELECT * FROM tenant_invites WHERE token_hash = ?", (th,)).fetchone()
-        if row is None or row["revoked"] or row["used_at"] is not None or row["expires_at"] < now:
-            return None
-        if row["email"] and (not email or row["email"] != email.lower()):
-            return None
-        cur = c.execute(
-            "UPDATE tenant_invites SET used_at = ?, used_by = ? WHERE id = ? AND used_at IS NULL AND revoked = 0",
-            (now, (email or "").lower() or None, row["id"]))
-        c.commit()
-        if cur.rowcount != 1:
-            return None
+    row = auth._consume_invite(token, email)
+    if row is None:
+        return None
     return {"invite_id": row["id"], "tenant_id": row["tenant_id"], "role": row["role"]}
 
 

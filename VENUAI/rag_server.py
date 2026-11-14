@@ -643,6 +643,7 @@ def add_tenant_member(
     the same way `seed_demo_users()` provisions the two demo accounts.
     Enforces the tenant's max_users quota — see auth.create_user().
     """
+    auth.enforce_password_policy(body.password, body.email)  # same policy as self-service signup (S1)
     return auth.create_user(body.email, body.password, role=body.role, tenant_id=current_user.tenant_id)
 
 

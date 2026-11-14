@@ -182,6 +182,12 @@ def run_python(code: str, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS, user_i
     container crash or Docker error surfaces as a real, non-zero
     `exit_code` with the real stderr, not a swallowed exception.
     """
+    # Defence in depth: every caller (agent tool, API route, MCP) hits the operator switch here.
+    from VENUAI.policy_engine import code_execution_enabled
+    if not code_execution_enabled():
+        raise SandboxUnavailableError(
+            "Code execution is disabled on this deployment (operator must set ENABLE_CODE_EXECUTION=1)."
+        )
     if _approval_hook is not None and not _approval_hook(code):
         raise SandboxApprovalDenied("code execution was not approved")
     if not is_available():

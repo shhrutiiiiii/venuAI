@@ -63,15 +63,13 @@ def is_production(env: Optional[Mapping[str, str]] = None) -> bool:
 
 
 def is_weak_secret(secret: Optional[str]) -> bool:
-    """True for a missing, short, low-entropy or obviously-placeholder secret."""
-    if not secret or len(secret) < _MIN_SECRET_LEN:
+    """True for a missing, short, low-entropy or placeholder secret (policy: secret_policy, shared with auth)."""
+    from VENUAI.secret_policy import validate_jwt_secret
+    try:
+        validate_jwt_secret(secret)
+        return False
+    except RuntimeError:
         return True
-    low = secret.lower()
-    if any(m in low for m in _WEAK_SECRET_MARKERS):
-        return True
-    if len(set(secret)) < 10:          # e.g. "aaaa...", "abababab..."
-        return True
-    return False
 
 
 def allowed_origins(env: Optional[Mapping[str, str]] = None) -> List[str]:

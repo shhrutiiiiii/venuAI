@@ -47,17 +47,20 @@ Add the advisory id to `VENUAI/audit-ignore.txt` (or `.trivyignore`) with `owner
 ## Test harness for other streams
 `from VENUAI.tests.security.fixtures import *` gives `two_tenants` (alice and carol in tenant A, bob in tenant B, an admin; each with `.headers`), `sec_client`, `make_token`, `forged_tokens` (alg=none, wrong secret, expired, wrong type, garbage) and `evil_origin`. Mark tests with `pytest.mark.security`; CI runs `pytest -m security`.
 
-## Standards map (status updated after S1-S4 merge)
+## Standards map (status after S1-S5 merge)
 | Standard item | Control | Owner | Status |
 |---|---|---|---|
-| ASVS V14 Config / API8 Misconfiguration | Hardened images, prod compose, no published DB/API ports, prod config validation | S5 / S4 | containers done; app config S4 |
-| ASVS V14.2 Dependencies / LLM03 Supply chain | Hash-pinned lock, audits, Dependabot, SHA-pinned actions, SBOM | S5 | done |
-| ASVS V2/V3 Auth, sessions / API2 | JWT, refresh, rate limits | S1 | see S1 |
-| ASVS V4 Access control / API1, API5 | Tenant isolation, admin routes | S2 | see S2 |
-| LLM01, LLM05, LLM06 | Prompt injection, output handling, agency | S3 | see S3 |
-| ASVS V7 Logging / LLM02 | Log redaction | S4 | see S4 |
+| ASVS V14 Config / API8 Misconfiguration | Hardened images, prod compose, no published DB/API ports; `config.validate_config` fails fast in production (JWT secret policy shared with auth via `secret_policy.py`, CORS, docs off, proxy trust) | S5 / S4 | done |
+| ASVS V14.2 Dependencies / LLM03 Supply chain | Hash-pinned lock, audits, Dependabot, SHA-pinned actions, SBOM | S5 | done (lock not regenerated at merge: no new direct deps were introduced) |
+| ASVS V2/V3 Auth, sessions / API2 | Refresh-token families + reuse detection, uniform login failures, lockout, password policy (signup, reset, tenant member creation), OAuth hardening, CSRF (`src/proxy.ts` + `lib/csrf.ts`), append-only audit log, trusted client IP | S1 | done |
+| ASVS V4 Access control / API1, API5 | One `authz` module, 404 for non-visible resources, tenant in every memory/retrieval key, tenant-admin routes, one invite implementation (auth.tenant_invites) shared with registration, deny-by-default tool policy, `/health` minimal + `/health/details` admin | S2 | done |
+| LLM01, LLM05, LLM06 | Bounded + structurally scanned uploads, decompression-bomb defence, SSRF gate, MCP command allowlist, hardened sandbox gated by `ENABLE_CODE_EXECUTION`, request bounds, output sanitising | S3 | done |
+| ASVS V7 Logging / LLM02 | Log redaction, request ids, safe error bodies (no input echo; single 422 handler) | S4 | done |
 | ASVS V8 Data protection | Secrets in env only, gitignored data, `.dockerignore` | S5 | done |
+| API4 Resource consumption | Global/per-IP/per-user and daily LLM-cost rate limits, body limits (1 MB; uploads up to `MAX_UPLOAD_BYTES`, 30 MB) | S4 | done |
+| Browser hardening | Baseline headers, CSP Report-Only (enforce with `CSP_ENFORCE=1`), HSTS over https | S4 | CSP not yet enforcing |
 
-## Notes
-- Docker images were not built on the dev machine (no daemon); CI builds and scans them.
-- Base images are tag-pinned; run `scripts/security/pin_images.sh` to digest-pin before a production rollout.
+## Known follow-ups
+- Flip CSP to enforcing after reviewing `/api/csp-report` logs.
+- Regenerate `requirements.lock` (`scripts/security/update_lock.sh`) whenever `requirements.in` changes.
+- No email delivery: invites and password resets are handed over out-of-band.
