@@ -227,6 +227,9 @@ MATRIX = [
     ("doc-region-ask-pub", "POST", "/documents/{doc_pub}/regions/r1/ask", {"question": "what?"}, SEEN_PUBLIC),
     ("doc-delete-priv", "DELETE", "/documents/{doc_priv}", None, OWNER_ONLY),
     ("doc-delete-pub", "DELETE", "/documents/{doc_pub}", None, PUBLIC_DELETE),
+    # RAPTOR is off in tests, so authorised callers get 503 (reached, no LLM tokens spent); others are rejected first.
+    ("doc-summaries-priv", "POST", "/documents/{doc_priv}/summaries", None, SEEN_OWNER),
+    ("doc-summaries-pub", "POST", "/documents/{doc_pub}/summaries", None, {"A": "seen", "B": 403, "ADM1": "seen", "C": 404, "ADM2": 404}),
     ("ds-analyze-priv", "POST", "/datasets/{ds_priv}/analyze", {"question": "total revenue"}, SEEN_OWNER),
     ("ds-analyze-pub", "POST", "/datasets/{ds_pub}/analyze", {"question": "total revenue"}, SEEN_PUBLIC),
     ("ds-delete-priv", "DELETE", "/datasets/{ds_priv}", None, OWNER_ONLY),
