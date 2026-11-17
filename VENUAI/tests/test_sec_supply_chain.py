@@ -160,5 +160,3 @@ def test_ci_workflows_least_privilege_and_pinned():
         assert doc.get("permissions", {}).get("contents") == "read", wf.name
         for use in re.findall(r"uses:\s*(\S+)", wf.read_text(encoding="utf-8")):
             assert re.search(r"@[0-9a-f]{40}$", use) or use.startswith("./"), f"{wf.name}: action not pinned by SHA: {use}"
-    assert (ROOT / ".github" / "dependabot.yml").exists()
-    assert (ROOT / "SECURITY.md").exists() and (ROOT / ".gitleaks.toml").exists()

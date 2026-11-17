@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Node 22 LTS (Node 20 is end-of-life). Pin by digest with scripts/security/pin_images.sh.
+# Node 22 LTS (Node 20 is end-of-life). Pin the base image by digest for reproducible builds.
 ARG NODE_IMAGE=node:22-alpine
 
 FROM ${NODE_IMAGE} AS deps

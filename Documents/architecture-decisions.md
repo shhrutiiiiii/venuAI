@@ -172,13 +172,13 @@ If you make a decision that a future reader would otherwise have to reverse-engi
 **Decision:** `semantic_cache_sweep`, `calibration`, `reasoning_experiment`, `chunk_size_sweep` added; `harvest --resume`; judge key isolation (`EVAL_JUDGE_API_KEY`); five poisoned-document cases with exact canaries. Anything that spends Groq tokens needs `--live`. **Finding:** with MiniLM, near-miss pairs (AURORA-XB vs AURORA-X, Agni-V vs Agni-IV) reach cosine >= 0.93 in 2 of 4 cases while only 1 of 4 paraphrases does, so a 0.93 semantic cache tier can serve wrong answers; keep it off or raise the threshold (>= 0.98 on this sample) and rely on the exact-hash tier.
 
 ### ADR-S5.1: Hash-pinned Python lock; loose `requirements.in`
-Direct dependencies live upper-bounded in `VENUAI/requirements.in`; `uv pip compile --universal --generate-hashes` produces `requirements.lock`, which CI and Docker install with `--require-hashes`. Rationale: reproducible, tamper-evident installs and weekly Dependabot/pip-audit signal. The voice prototype libraries are split out because they cannot be built in the server image. Exceptions to pip-audit live in `VENUAI/audit-ignore.txt` with owner and expiry (CI fails on expired entries).
+Direct dependencies live upper-bounded in `VENUAI/requirements.in`; `uv pip compile --universal --generate-hashes` produces `requirements.lock`, which CI and Docker install with `--require-hashes`. Rationale: reproducible, tamper-evident installs and dependency audits that can be run on demand. The voice prototype libraries are split out because they cannot be built in the server image. Known advisories were recorded at the time in `Documents/DevOps/security-checklist.md`.
 
 ### ADR-S5.2: Separate dev and prod compose files
 Dev keeps convenience ports on localhost; prod publishes only the TLS proxy and runs every service read-only, cap-dropped and resource-limited. Rationale: a single file with defaults tends to leak dev conveniences (published DB/API ports, default passwords) into production.
 
 ### ADR-S5.3: Security scanning is a separate workflow
-`.github/workflows/security.yml` (pip-audit, npm audit, Bandit, gitleaks, CodeQL, Trivy fs and image, SBOM, compose policy) runs on push, PRs and weekly, with all actions pinned by commit SHA and `permissions: contents: read` by default.
+`.github/workflows/security.yml` (pip-audit, npm audit, Bandit, gitleaks, CodeQL, Trivy fs and image, SBOM, compose policy) ran on push, PRs and weekly. **Later removed by owner decision** together with `dependabot.yml`, `SECURITY.md`, the scanner config files and `scripts/security/`; the rest of S5 (hash-pinned lock, hardened Docker images, prod compose) is unchanged.
 
 ### ADR-S4.1: One module owns HTTP hardening; production fails fast
 **Context:** headers, CORS, limits and error shapes were scattered or absent (wildcard CORS methods/headers, `str(e)` in responses, per-IP-only limits, `/docs` always on, silent weak config).

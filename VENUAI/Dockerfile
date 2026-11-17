@@ -2,7 +2,7 @@
 # Build context is the REPO ROOT (see docker-compose.yml): docker build -f VENUAI/Dockerfile .
 #
 # Pin the base by digest for reproducible, tamper-evident builds:
-#   scripts/security/pin_images.sh   (prints the digest-pinned FROM lines)
+#   docker buildx imagetools inspect <image>:<tag>   (prints the digest to use in FROM)
 ARG PYTHON_IMAGE=python:3.12-slim
 
 # ---- builder: has compilers, never shipped ----------------------------------

@@ -1,7 +1,5 @@
-# Test + security tooling (not installed in the production image).
+# Test tooling (not installed in the production image).
 -r requirements.lock
 pytest>=8.3,<10
 pytest-asyncio>=0.24,<2
-bandit>=1.8,<2
-pip-audit>=2.7,<3
 pip-tools>=7.4,<8

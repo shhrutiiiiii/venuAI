@@ -52,7 +52,4 @@ VENUAI/evals/reports/*
 !VENUAI/evals/reports/baseline_a4.*
 !VENUAI/evals/reports/harvest_baseline.jsonl
 chat-app/.env.local
-sbom*.json
-trivy-*.json
-bandit-report.*
 

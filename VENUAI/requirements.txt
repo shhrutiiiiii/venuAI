@@ -1,4 +1,4 @@
 # Hash-pinned, fully resolved runtime set. Direct deps live in requirements.in;
-# regenerate the lock with scripts/security/update_lock.sh. Dev/test tools:
+# regenerate the lock with: uv pip compile --universal --generate-hashes requirements.in -o requirements.lock. Dev/test tools:
 # requirements-dev.txt. Local voice prototype (main.py): requirements-voice.txt.
 -r requirements.lock

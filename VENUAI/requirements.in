@@ -1,6 +1,6 @@
 # Direct dependencies of the VenuAI backend (loose, upper-bounded).
 # The fully pinned, hash-verified set that CI and Docker install is
-# requirements.lock (regenerate with scripts/security/update_lock.sh).
+# requirements.lock (regenerate with: uv pip compile --universal --generate-hashes requirements.in -o requirements.lock).
 # requirements.txt = `-r requirements.lock` + dev tools, kept for `pip install -r`.
 
 groq>=0.11,<2

@@ -1,9 +1,8 @@
 # PRODUCTION compose. Only the TLS reverse proxy publishes ports. The backend and
 # postgres live on the internal network with no host port. Secrets come from the
 # environment / an env file that is NOT in git:
-#   cp .env.prod.example .env.prod   # then fill in; python scripts/security/gen_secrets.py
+#   cp .env.prod.example .env.prod   # then fill in; python -c "import secrets; print(secrets.token_urlsafe(48))"
 #   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
-# Validate with: scripts/security/check_compose.sh
 x-hardening: &hardening
   read_only: true
   cap_drop: [ALL]
