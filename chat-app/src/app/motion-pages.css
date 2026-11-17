@@ -1,0 +1,86 @@
+/* Page-local motion + surface tokens for secondary pages (workspace, evidence, security, analytics).
+   p- classes mirror U1's m- utilities; swap on merge if desired. */
+:root {
+  --p-ok: #34d399;
+  --p-warn: #fbbf24;
+  --p-bad: #f87171;
+  --p-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+[data-theme="light"] {
+  --p-ok: #047857;
+  --p-warn: #a16207;
+  --p-bad: #b91c1c;
+}
+
+@keyframes p-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes p-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes p-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes p-grow-x { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes p-grow-y { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes p-pop { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: none; } }
+@keyframes p-draw { from { stroke-dashoffset: var(--len, 1); } to { stroke-dashoffset: 0; } }
+
+.p-fade-in { animation: p-fade 220ms var(--p-ease) both; }
+.p-rise { animation: p-rise 260ms var(--p-ease) both; }
+/* children rise in sequence; set --i on each child (callers cap it) */
+.p-stagger > * { animation: p-rise 260ms var(--p-ease) both; animation-delay: calc(var(--i, 0) * 45ms); }
+.p-bar-x { transform-origin: left center; animation: p-grow-x 600ms var(--p-ease) both; animation-delay: calc(var(--i, 0) * 60ms); }
+.p-bar-y { transform-origin: bottom center; animation: p-grow-y 600ms var(--p-ease) both; animation-delay: calc(var(--i, 0) * 60ms); }
+.p-pop { animation: p-pop 260ms var(--p-ease) both; animation-delay: calc(var(--i, 0) * 40ms); transform-box: fill-box; transform-origin: center; }
+.p-draw { stroke-dasharray: var(--len, 1); animation: p-draw 700ms var(--p-ease) both; }
+
+.p-skeleton {
+  border-radius: 8px;
+  background: linear-gradient(90deg, var(--bg-input) 25%, var(--bg-card-hover) 50%, var(--bg-input) 75%);
+  background-size: 200% 100%;
+  animation: p-shimmer 1.6s linear infinite;
+}
+
+.p-surface {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+}
+.p-inset {
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+}
+.p-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 12px;
+  font-size: 12px; font-weight: 600; line-height: 1.2;
+  background: var(--bg-card); border: 1px solid var(--border-subtle); color: var(--text-main);
+  transition: background-color 160ms var(--p-ease), border-color 160ms var(--p-ease), transform 120ms var(--p-ease), opacity 160ms;
+  cursor: pointer; white-space: nowrap;
+}
+.p-btn:hover:not(:disabled) { background: var(--bg-card-hover); border-color: var(--border-hover); }
+.p-btn:active:not(:disabled) { transform: scale(0.97); }
+.p-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.p-btn-primary { background: var(--primary-accent); color: var(--btn-text); border-color: transparent; }
+.p-btn-primary:hover:not(:disabled) { background: var(--primary-hover); border-color: transparent; }
+.p-row { transition: background-color 160ms var(--p-ease), border-color 160ms var(--p-ease); }
+.p-row:hover { background: var(--bg-card-hover); border-color: var(--border-hover); }
+.p-field {
+  background: var(--bg-input); border: 1px solid var(--border-subtle); color: var(--text-main);
+  border-radius: 12px; outline: none; transition: border-color 160ms var(--p-ease);
+}
+.p-btn:focus-visible, .p-row:focus-visible, .p-tab:focus-visible, .p-link:focus-visible, .p-field:focus-visible, .p-node:focus-visible {
+  outline: 2px solid var(--border-focus); outline-offset: 2px;
+}
+.p-tab { transition: background-color 160ms var(--p-ease), color 160ms var(--p-ease); }
+.p-tabs { scrollbar-width: none; }
+.p-tabs::-webkit-scrollbar { display: none; }
+.p-node { cursor: pointer; outline: none; }
+.p-node circle.p-disc { transition: transform 160ms var(--p-ease), opacity 160ms; transform-box: fill-box; transform-origin: center; }
+.p-node:hover circle.p-disc, .p-node:focus-visible circle.p-disc { transform: scale(1.08); opacity: 1; }
+.p-node:focus-visible circle.p-ring { stroke: var(--border-focus); stroke-width: 2; }
+.p-th { font-size: 11px; font-weight: 600; color: var(--text-muted); text-align: left; padding: 10px 12px; white-space: nowrap; }
+.p-td { padding: 10px 12px; font-size: 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .p-fade-in, .p-rise, .p-stagger > *, .p-bar-x, .p-bar-y, .p-pop, .p-draw { animation: none !important; }
+  .p-skeleton { animation: none; }
+  .p-btn, .p-row, .p-tab, .p-node circle.p-disc, .p-field { transition: none; }
+  .p-btn:active:not(:disabled) { transform: none; }
+}
