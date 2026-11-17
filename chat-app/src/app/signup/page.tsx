@@ -72,7 +72,7 @@ export default function SignupPage() {
             </div>
           )}
 
-          <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-4">
+          <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-4 m-stagger">
             <div>
               <label htmlFor="email" className="block text-xs font-semibold mb-1.5" style={{ color: "var(--text-muted)" }}>
                 <Mail className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" /> Email address
@@ -126,7 +126,7 @@ export default function SignupPage() {
             <button
               type="submit"
               disabled={isSubmitting || isSuccess}
-              className={`w-full py-3 rounded-xl font-semibold text-sm shadow-sm transition-all duration-150 ${
+              className={`m-press w-full py-3 rounded-xl font-semibold text-sm shadow-sm transition-all duration-150 ${
                 isSubmitting || isSuccess ? "opacity-75 cursor-not-allowed" : "hover:opacity-95 active:scale-[0.99]"
               }`}
               style={{ background: "var(--primary-gradient)", color: "var(--btn-text)" }}

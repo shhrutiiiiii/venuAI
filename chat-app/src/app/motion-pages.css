@@ -1,10 +1,10 @@
 /* Page-local motion + surface tokens for secondary pages (workspace, evidence, security, analytics).
-   p- classes mirror U1's m- utilities; swap on merge if desired. */
+   Shares timing tokens with the m- utilities in globals.css. */
 :root {
   --p-ok: #34d399;
   --p-warn: #fbbf24;
   --p-bad: #f87171;
-  --p-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --p-ease: var(--m-ease, cubic-bezier(0.22, 1, 0.36, 1));
 }
 [data-theme="light"] {
   --p-ok: #047857;

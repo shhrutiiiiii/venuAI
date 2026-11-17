@@ -214,7 +214,7 @@ export default function LoginForm() {
           </div>
         )}
 
-        <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-4">
+        <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-4 m-stagger">
           {/* Email field */}
           <FloatingInput
             id="email"
@@ -289,7 +289,7 @@ export default function LoginForm() {
             id="login-submit-btn"
             type="submit"
             disabled={isSubmitting || isSuccess}
-            className={`w-full py-3 rounded-xl font-semibold text-sm shadow-sm transition-all duration-150 ${
+            className={`m-press w-full py-3 rounded-xl font-semibold text-sm shadow-sm transition-all duration-150 ${
               isSubmitting || isSuccess
                 ? "opacity-75 cursor-not-allowed"
                 : "hover:opacity-95 active:scale-[0.99]"

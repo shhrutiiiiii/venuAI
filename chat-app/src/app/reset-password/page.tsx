@@ -73,7 +73,7 @@ function ResetPasswordForm() {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form onSubmit={handleSubmit} className="space-y-4 m-stagger">
       {error && (
         <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-xl px-3 py-2">{error}</p>
       )}
@@ -108,7 +108,7 @@ function ResetPasswordForm() {
       <button
         type="submit"
         disabled={loading}
-        className="w-full py-3 rounded-2xl text-sm font-semibold text-white disabled:opacity-60 disabled:cursor-not-allowed transition-all hover:scale-[1.02] hover:shadow-[0_8px_30px_rgba(139,92,246,0.3)]"
+        className="m-press w-full py-3 rounded-2xl text-sm font-semibold text-white disabled:opacity-60 disabled:cursor-not-allowed transition-all hover:scale-[1.02] hover:shadow-[0_8px_30px_rgba(139,92,246,0.3)]"
         style={{ background: "linear-gradient(135deg, #7c3aed 0%, #6366f1 100%)" }}
       >
         {loading ? "Updating…" : "Update password"}

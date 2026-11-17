@@ -13,9 +13,6 @@ export default function LoginPage() {
       className="relative min-h-screen w-full flex overflow-hidden transition-colors duration-250"
       style={{ color: "var(--text-main)" }}
     >
-      {/* Soft Ambient Light Accents */}
-      <div className="absolute -top-40 -left-40 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-indigo-500/5 rounded-full blur-3xl pointer-events-none" />
 
       {/* Fixed Theme Toggle Switch Top Right */}
       <div className="absolute top-5 right-5 z-50">
@@ -48,14 +45,14 @@ export default function LoginPage() {
               color: "var(--badge-text)",
             }}
           >
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <div className="w-2 h-2 rounded-full bg-emerald-500" />
             <span>DRDO Network Active</span>
           </div>
         </div>
 
         {/* Product showcase content */}
-        <div className="space-y-10 max-w-lg my-auto py-6">
-          <div className="space-y-3.5">
+        <div className="space-y-10 max-w-lg my-auto py-6 m-stagger">
+          <div className="space-y-3.5 m-stagger">
             <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-black tracking-widest uppercase border border-cyan-500/40 bg-cyan-500/10 text-cyan-400 shadow-sm">
               <Shield className="w-3.5 h-3.5" />
               <span>DEFENCE R&amp;D NETWORK • SCIENTIFIC PORTAL</span>
