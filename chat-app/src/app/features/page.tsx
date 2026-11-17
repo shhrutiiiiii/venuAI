@@ -44,16 +44,16 @@ export default function FeaturesPage() {
   const raptor = by("raptor");
 
   return (
-    <main className="max-w-3xl mx-auto px-4 py-8" style={{ color: "var(--text-main)" }}>
+    <main className="max-w-3xl mx-auto px-4 py-8 m-fade-in" style={{ color: "var(--text-main)" }}>
       <Link href="/chat" className="text-xs" style={{ color: "var(--text-muted)" }}>&larr; Back to chat</Link>
       <h1 className="text-xl font-bold mt-2">Features</h1>
       <p className="text-xs mb-6" style={{ color: "var(--text-muted)" }}>
         Optional features and what they cost in LLM tokens. Nothing here runs automatically; see Documents/AI/token-costs.md.
       </p>
       {unavailable && <p role="status" className="text-sm">Feature information is not available from this server.</p>}
-      {!features && !unavailable && <p className="text-sm">Loading...</p>}
+      {!features && !unavailable && <div role="status" aria-label="Loading features" className="space-y-3"><div className="m-skeleton h-20 w-full rounded-xl" /><div className="m-skeleton h-20 w-full rounded-xl" /><div className="m-skeleton h-20 w-full rounded-xl" /></div>}
       {features && (
-        <div className="space-y-3">
+        <div className="space-y-3 m-stagger">
           {memory && (
             <FeatureCard feature={memory}>
               <MemoryOptIn serverOn={memory.enabled} />

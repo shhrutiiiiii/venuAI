@@ -1037,7 +1037,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                           border: isActive ? "1px solid var(--badge-border)" : "1px solid transparent",
                         }}
                       >
-                        <div className="flex items-center gap-2 min-w-0">
+                        <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
                           <MessageCircle className="w-3.5 h-3.5 shrink-0" />
                           <span className="truncate text-left font-medium">{thread.title}</span>
                         </div>
@@ -1247,7 +1247,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
             </div>
           ) : (
             /* DRDO RAG Header */
-            <div className="hidden sm:flex items-center gap-3 min-w-0">
+            <div className="hidden 2xl:flex items-center gap-3 min-w-0">
               <div className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden border shrink-0" style={{ background: "var(--bg-card)", borderColor: "var(--border-subtle)" }}>
                 <img src="/drdo-logo.png" alt="DRDO Emblem" className="w-8 h-8 object-contain" />
               </div>
@@ -1268,9 +1268,9 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
           )}
 
           {/* Right Header Actions */}
-          <div className="flex items-center gap-2 sm:gap-3 min-w-0 ml-auto">
+          <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 min-w-0 ml-auto">
             {workspaceMode === "drdo_rag" && (
-              <div className="flex items-center gap-2 min-w-0">
+              <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
                 <ModelRouting models={registryModels} />
                 <button
                   type="button"
@@ -1318,7 +1318,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
               </div>
             )}
 
-            <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold" style={{ background: "var(--badge-bg)", border: "1px solid var(--badge-border)", color: "var(--badge-text)" }}>
+            <div className="hidden 2xl:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold" style={{ background: "var(--badge-bg)", border: "1px solid var(--badge-border)", color: "var(--badge-text)" }}>
               <div className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--ok)" }} />
               <span>Engine online</span>
             </div>
