@@ -1256,6 +1256,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                   </select>
                 )}
                 {caps.memory && <MemoryButton />}
+                <a href="/features" className="px-2.5 py-1.5 rounded-xl text-xs font-semibold border" style={{ background: "var(--bg-input)", color: "var(--text-muted)", borderColor: "var(--border-subtle)" }} title="Optional features and token costs">Features</a>
                 <AgentModeToggle mode={agentMode} onChange={setAgentMode} disabled={deepResearch} />
                 <button
                   type="button"

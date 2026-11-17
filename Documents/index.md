@@ -24,6 +24,7 @@ A user uploads a PDF into the knowledge base, then asks questions in a chat UI. 
 | DevOps | [`DevOps/deployment.md`](DevOps/deployment.md) | Current (manual, local-only) run model and what's missing for real deployment |
 | AI | [`AI/index.md`](AI/index.md) | Multi-agent orchestration, prompts, LangGraph workflows, context engineering |
 | Evaluation | [`AI/evaluation.md`](AI/evaluation.md) | Real RAG eval harness: harvest/score, metrics, judge, datasets, CI gates |
+| Token costs | [`AI/token-costs.md`](AI/token-costs.md) | Register of every mechanism that spends Groq tokens beyond answer generation, with a token-saving env profile |
 
 ## Design Principles
 1. **Everything slow and LLM-dependent runs through an explicit graph, not inline branching.** The RAG pipeline is a LangGraph `StateGraph` (`retrieve → generate → verify`), so new steps are added as nodes/edges, not nested `if`s. See [`AI/workflows.md`](AI/workflows.md).

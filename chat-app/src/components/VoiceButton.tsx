@@ -100,7 +100,14 @@ export function VoiceButton({ onTranscript, disabled }: { onTranscript: (text: s
     }
   };
 
-  if (!status?.stt) return null;
+  if (!status?.stt) {
+    return (
+      <button type="button" disabled aria-label="Voice question (disabled)" title="Voice is off on this server. Set VOICE_ENABLED=on (see Features)"
+        className="p-2 rounded-full opacity-40 cursor-not-allowed" style={{ color: "var(--text-muted)" }}>
+        <Mic className="w-4 h-4" />
+      </button>
+    );
+  }
   const busy = state === "transcribing";
   return (
     <span className="relative inline-flex items-center no-print">
@@ -152,7 +159,15 @@ export function SpeakButton({ text }: { text: string }) {
     []
   );
 
-  if (!status?.tts) return null;
+  if (!status?.tts) {
+    return (
+      <button type="button" disabled title="Voice is off on this server. Set VOICE_ENABLED=on (see Features)"
+        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[10px] font-bold no-print opacity-40 cursor-not-allowed"
+        style={{ borderColor: "var(--border-subtle)", color: "var(--text-muted)" }}>
+        <Volume2 className="w-3 h-3" /> Listen
+      </button>
+    );
+  }
 
   const toggle = async () => {
     if (state === "playing") {

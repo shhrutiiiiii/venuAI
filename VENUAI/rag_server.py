@@ -123,7 +123,7 @@ http_security.register_security(app, limiter)
 import importlib as _importlib
 
 for _mod in ("research_api", "voice_api", "memory_api", "trace_api",
-             "a2a_api", "approvals_api", "export_api", "tenant_admin"):
+             "a2a_api", "approvals_api", "export_api", "tenant_admin", "features_api"):
     _full = f"VENUAI.{_mod}"
     try:
         app.include_router(_importlib.import_module(_full).router)

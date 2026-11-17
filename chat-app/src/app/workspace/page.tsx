@@ -1,5 +1,6 @@
 "use client";
 
+import { RaptorBuildButton } from "@/components/features/FeatureControls";
 import React, { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -121,6 +122,13 @@ export default function WorkspacePage() {
   const [tab, setTab] = useState<Tab>("overview");
   const [tenant, setTenant] = useState<TenantInfo | null>(null);
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
+  const [raptorOn, setRaptorOn] = useState(false);
+  useEffect(() => {
+    fetch("/api/features", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setRaptorOn(!!d?.features?.find((f: { key: string; enabled: boolean }) => f.key === "raptor")?.enabled))
+      .catch(() => undefined);
+  }, []);
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [agents, setAgents] = useState<AgentOut[]>([]);
   const [models, setModels] = useState<ModelOut[]>([]);
@@ -377,6 +385,7 @@ export default function WorkspacePage() {
                         {d.pages} pages · {d.chunks} chunks · {d.size_kb} KB
                       </div>
                     </div>
+                    <RaptorBuildButton docId={d.id} serverOn={raptorOn} />
                     <button onClick={() => deleteDocument(d.id)} className="p-2 rounded-lg hover:bg-red-500/10 text-red-500">
                       <Trash2 className="w-4 h-4" />
                     </button>
