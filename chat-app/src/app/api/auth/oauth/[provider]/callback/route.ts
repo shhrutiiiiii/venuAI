@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { setSessionCookies } from "@/lib/authCookies";
+import { forwardHeaders } from "@/lib/forwardHeaders";
 
 const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
-const ACCESS_COOKIE = "venuai_access_token";
-const REFRESH_COOKIE = "venuai_refresh_token";
+const BINDING_COOKIE = "venuai_oauth_binding";
 
 /**
  * Where the OAuth provider redirects back to. Exchanges the real
@@ -15,8 +16,15 @@ export async function GET(req: NextRequest) {
   const state = req.nextUrl.searchParams.get("state");
   const provider = req.nextUrl.pathname.split("/").at(-2) ?? "";
 
+  const bindingCookie = req.cookies.get(BINDING_COOKIE)?.value;
+  const fail = (msg: string) => {
+    const r = NextResponse.redirect(new URL(`/login?error=${encodeURIComponent(msg)}`, req.nextUrl.origin));
+    r.cookies.set(BINDING_COOKIE, "", { path: "/api/auth/oauth", maxAge: 0 });
+    return r;
+  };
+
   if (!code || !state) {
-    return NextResponse.redirect(new URL("/login?error=oauth_missing_params", req.nextUrl.origin));
+    return fail("oauth_missing_params");
   }
 
   const redirectUri = `${req.nextUrl.origin}/api/auth/oauth/${provider}/callback`;
@@ -24,26 +32,21 @@ export async function GET(req: NextRequest) {
   try {
     const backendRes = await fetch(`${RAG_SERVER}/auth/oauth/${encodeURIComponent(provider)}/callback`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, state, redirect_uri: redirectUri }),
+      headers: { "Content-Type": "application/json", ...forwardHeaders(req) },
+      body: JSON.stringify({ code, state, redirect_uri: redirectUri, binding: bindingCookie ?? null }),
     });
     const data = await backendRes.json();
 
     if (!backendRes.ok) {
-      const detail = encodeURIComponent(data.detail || "oauth_failed");
-      return NextResponse.redirect(new URL(`/login?error=${detail}`, req.nextUrl.origin));
+      return fail(typeof data.detail === "string" ? data.detail : "oauth_failed");
     }
 
     const res = NextResponse.redirect(new URL("/chat", req.nextUrl.origin));
-    res.cookies.set(ACCESS_COOKIE, data.access_token, {
-      httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 60 * 30,
-    });
-    res.cookies.set(REFRESH_COOKIE, data.refresh_token, {
-      httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 60 * 60 * 24 * 14,
-    });
+    setSessionCookies(res, data.access_token, data.refresh_token);
+    res.cookies.set(BINDING_COOKIE, "", { path: "/api/auth/oauth", maxAge: 0 }); // single use
     return res;
   } catch (err) {
     console.error("[OAuth Callback] Error:", err);
-    return NextResponse.redirect(new URL("/login?error=oauth_service_unavailable", req.nextUrl.origin));
+    return fail("oauth_service_unavailable");
   }
 }

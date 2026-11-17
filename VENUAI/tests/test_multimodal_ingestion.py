@@ -100,7 +100,7 @@ def test_image_region_reports_ocr_unavailable_honestly_when_run_ocr_true(sample_
         pytest.skip("Tesseract is installed in this environment")
     assert image_region.ocr_text is None
     assert image_region.ocr_unavailable_reason is not None
-    assert "Tesseract" in image_region.ocr_unavailable_reason
+    assert "OCR" in image_region.ocr_unavailable_reason  # S3 sanitised wording
 
 
 def test_no_region_is_ever_classified_as_chart_or_diagram(sample_pdf):

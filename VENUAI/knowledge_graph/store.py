@@ -133,6 +133,15 @@ class GraphStore(ABC):
     ) -> List[Relationship]: ...
 
 
+    def list_entities(self, tenant_id: str = "default", limit: int = 20000) -> List[Entity]:
+        """All entities of a tenant (graph retrieval). Default: via find_entities."""
+        return self.find_entities(allowed_owner_ids=None, limit=limit, tenant_id=tenant_id)
+
+    def list_relationships(self, tenant_id: str = "default", limit: int = 100000) -> List[Relationship]:
+        """All relationships of a tenant (graph retrieval). Implemented by each backend."""
+        raise NotImplementedError
+
+
 class SqliteGraphStore(GraphStore):
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self._db_path = db_path or (Path(__file__).parent.parent / "data" / "knowledge_graph.db")
@@ -212,6 +221,13 @@ class SqliteGraphStore(GraphStore):
                  relationship.source_date, relationship.created_at or datetime.now().isoformat()),
             )
             conn.commit()
+
+    def list_relationships(self, tenant_id: str = "default", limit: int = 100000) -> List[Relationship]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM kg_relationships WHERE tenant_id = ? LIMIT ?", [tenant_id, limit],
+            ).fetchall()
+        return [_row_to_relationship(r) for r in rows]
 
     def get_relationships_for_entity(
         self, entity_id: str, as_of: Optional[datetime] = None,
@@ -390,6 +406,16 @@ class PostgresGraphStore(GraphStore):
             conn.commit()
         finally:
             conn.close()
+
+    def list_relationships(self, tenant_id: str = "default", limit: int = 100000) -> List[Relationship]:
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM kg_relationships WHERE tenant_id = %s LIMIT %s", [tenant_id, limit])
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [self._dict_to_relationship(r) for r in rows]
 
     def get_relationships_for_entity(
         self, entity_id: str, as_of: Optional[datetime] = None,

@@ -13,14 +13,20 @@ Multi-layered security & safety guardrail engine enforcing:
      - Tracks all security triggers to SQLite audit store
 """
 
+import base64
+import binascii
 import json
 import logging
 import re
 import sqlite3
+import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from VENUAI.output_sanitizer import neutralise_markdown
+from VENUAI.pii_redaction import redact, redact_identifiers
 
 logger = logging.getLogger("drdo-rag")
 
@@ -34,6 +40,9 @@ class GuardrailResult:
     action_taken: str = "allow"           # allow, block, sanitize, warn
     message: str = "Passed guardrail check."
     sanitized_input_or_output: str = ""
+    # Machine-readable detail (set on blocks): e.g. "prompt_injection", "prompt_injection_classifier"
+    block_reason: Optional[str] = None
+    detail: dict = field(default_factory=dict)
 
 
 class PromptInjectionDetector:
@@ -52,11 +61,41 @@ class PromptInjectionDetector:
         r"act\s+as\s+an\s+unrestricted",
     ]
 
+    _ZERO_WIDTH_RE = re.compile("[​-‏‪-‮⁠-⁤﻿­]")
+    _B64_RE = re.compile(r"[A-Za-z0-9+/]{24,}={0,2}")
+    _HEX_RE = re.compile(r"(?:[0-9a-fA-F]{2}){12,}")
+
+    @classmethod
+    def normalise(cls, text: str) -> str:
+        """NFKC (folds full-width/compat forms) + zero-width/bidi/soft-hyphen removal."""
+        t = unicodedata.normalize("NFKC", text or "")
+        t = cls._ZERO_WIDTH_RE.sub("", t)
+        return t.lower()
+
+    @classmethod
+    def _decoded_variants(cls, text: str) -> List[str]:
+        """Second pass: base64 / hex blobs decoded to text so encoded payloads are scanned too."""
+        out: List[str] = []
+        for m in cls._B64_RE.findall(text)[:20]:
+            try:
+                out.append(base64.b64decode(m + "=" * (-len(m) % 4), validate=False).decode("utf-8", "ignore"))
+            except (binascii.Error, ValueError):
+                pass
+        for m in cls._HEX_RE.findall(text)[:20]:
+            try:
+                out.append(bytes.fromhex(m).decode("utf-8", "ignore"))
+            except ValueError:
+                pass
+        return out
+
     def check(self, text: str) -> Tuple[bool, Optional[str]]:
-        lowered = text.lower()
-        for pattern in self.INJECTION_PATTERNS:
-            if re.search(pattern, lowered):
-                return False, f"Prompt injection / security bypass detected (pattern matched: '{pattern}')"
+        base = unicodedata.normalize("NFKC", text or "")
+        spaced = self._ZERO_WIDTH_RE.sub(" ", base).lower()  # invisible char used in place of a space
+        candidates = [self.normalise(text), spaced] + [self.normalise(v) for v in self._decoded_variants(base)]
+        for lowered in candidates:
+            for pattern in self.INJECTION_PATTERNS:
+                if re.search(pattern, lowered):
+                    return False, f"Prompt injection / security bypass detected (pattern matched: '{pattern}')"
         return True, None
 
 
@@ -179,13 +218,19 @@ class GuardrailEngine:
                 conn.execute(
                     "INSERT INTO guardrail_logs (timestamp, user_id, query, violation_type, action_taken, message) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
-                    (datetime.utcnow().isoformat(), user_id or "anonymous", query[:200], violation_type, action, msg)
+                    (datetime.now(timezone.utc).isoformat(), user_id or "anonymous", redact(query[:200]), violation_type, action, redact(msg))
                 )
         except Exception as e:
             logger.error(f"[GuardrailEngine] Failed to audit log: {e}")
 
     def validate_input(self, text: str, user_id: str = "user") -> GuardrailResult:
-        """Run all input guardrail checks on the user query."""
+        """Run all input guardrail checks on the user query (blocks carry block_reason)."""
+        res = self._validate_input(text, user_id)
+        if not res.passed and not res.block_reason:
+            res.block_reason = res.violation_type
+        return res
+
+    def _validate_input(self, text: str, user_id: str = "user") -> GuardrailResult:
         if not text or not text.strip():
             return GuardrailResult(passed=False, violation_type="input_validation", action_taken="block", message="Query string cannot be empty.")
 
@@ -225,22 +270,82 @@ class GuardrailEngine:
                 sanitized_input_or_output="I am VenuAI, an assistant dedicated exclusively to DRDO defence R&D, laboratory mandates, and scientific research. Please submit a defence or scientific query."
             )
 
-        return GuardrailResult(passed=True, action_taken="allow", message="Passed input guardrails.", sanitized_input_or_output=text)
-
-    def validate_output(self, answer: str, grounding_score: float, user_id: str = "user") -> GuardrailResult:
-        """Run output guardrail checks (hallucination policies, grounding score thresholds)."""
-        if grounding_score < 0.40 and grounding_score > 0.0:
-            self.log_violation(user_id, "", "hallucination", "warn", f"Low grounding score ({grounding_score:.2f})")
-            sanitized = f"{answer}\n\n⚠️ **Guardrail Warning:** This response has low grounding confidence ({grounding_score:.2f}). Please verify facts with official DRDO publications."
+        # 4. Model-based injection classifier (Prompt Guard). Additive to the regex layer;
+        #    if it is disabled/unavailable we rely on the regex guardrails above (logged).
+        from VENUAI import safety_classifiers as _sc
+        score = _sc.prompt_guard_score(text)
+        if score is not None and score >= _sc.prompt_guard_threshold():
+            self.log_violation(user_id, text, "prompt_injection", "block", f"prompt_guard score {score:.3f}")
             return GuardrailResult(
-                passed=True,
-                violation_type="hallucination",
-                action_taken="warn",
-                message="Low grounding score warning appended.",
-                sanitized_input_or_output=sanitized
+                passed=False,
+                violation_type="prompt_injection",
+                action_taken="block",
+                message="Security Policy Block: Prompt injection or instruction bypass attempt detected.",
+                sanitized_input_or_output="Access Denied: Injection attempt logged.",
+                block_reason="prompt_injection_classifier",
+                detail={"prompt_guard_score": round(score, 4)},
             )
 
-        return GuardrailResult(passed=True, action_taken="allow", message="Passed output guardrails.", sanitized_input_or_output=answer)
+        return GuardrailResult(passed=True, action_taken="allow", message="Passed input guardrails.",
+                               sanitized_input_or_output=text,
+                               detail={"prompt_guard": "unavailable" if score is None else round(score, 4)})
+
+    # Output-side patterns: secrets / system-prompt leakage / Aadhaar-like identifiers.
+    _OUTPUT_REDACTIONS = [
+        (re.compile(r"\bgsk_[A-Za-z0-9]{20,}\b"), "[REDACTED_API_KEY]", "credential_leak"),
+        (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "[REDACTED_API_KEY]", "credential_leak"),
+        (re.compile(r"\b\d{4}\s\d{4}\s\d{4}\b"), "[REDACTED_ID_NUMBER]", "pii"),
+    ]
+    _PROMPT_LEAK_RE = re.compile(r"<\s*/?\s*(?:system_role|task_definition|untrusted_document[^>]*|evidence_policy)\s*>", re.I)
+
+    def validate_output(self, answer: str, grounding_score: Optional[float] = None,
+                        user_id: str = "user") -> GuardrailResult:
+        """
+        Output guardrails: secret/PII redaction, system-prompt leak block, and the
+        low-grounding warning. grounding_score=None means "not measured" and never
+        triggers (or suppresses) anything. The model-based policy check is separate:
+        see answer_pipeline.finalize_answer.
+        """
+        violations: List[str] = []
+        text = answer or ""
+        if self._PROMPT_LEAK_RE.search(text):
+            self.log_violation(user_id, "", "prompt_leak", "block", "answer contained internal prompt markup")
+            return GuardrailResult(
+                passed=False, violation_type="prompt_leak", action_taken="block",
+                message="Output blocked: internal prompt content detected.",
+                sanitized_input_or_output="I can't share that. Please rephrase your question.",
+                block_reason="output_prompt_leak",
+            )
+        for pat, repl, kind in self._OUTPUT_REDACTIONS:
+            if pat.search(text):
+                text = pat.sub(repl, text)
+                violations.append(kind)
+        safe_md = neutralise_markdown(text)
+        if safe_md != text:
+            text = safe_md
+            violations.append("markdown_exfil")
+        masked = redact_identifiers(text)
+        if masked != text:
+            text = masked
+            violations.append("pii_identifier")
+        if violations:
+            self.log_violation(user_id, "", ",".join(sorted(set(violations))), "sanitize", "sensitive tokens redacted from output")
+
+        if grounding_score is not None and 0.0 < grounding_score < 0.40:
+            self.log_violation(user_id, "", "hallucination", "warn", f"Low grounding score ({grounding_score:.2f})")
+            text = f"{text}\n\n⚠️ **Guardrail Warning:** This response has low grounding confidence ({grounding_score:.2f}). Please verify facts with official DRDO publications."
+            return GuardrailResult(
+                passed=True, violation_type="hallucination", action_taken="warn",
+                message="Low grounding score warning appended.", sanitized_input_or_output=text,
+                detail={"redactions": sorted(set(violations))},
+            )
+        if violations:
+            return GuardrailResult(
+                passed=True, violation_type=violations[0], action_taken="sanitize",
+                message="Sensitive tokens redacted.", sanitized_input_or_output=text,
+                detail={"redactions": sorted(set(violations))},
+            )
+        return GuardrailResult(passed=True, action_taken="allow", message="Passed output guardrails.", sanitized_input_or_output=text)
 
 
 # Global Guardrail Engine Singleton

@@ -17,7 +17,11 @@ This module intentionally has zero dependency on the RAG pipeline so it can
 be tested and reasoned about in isolation.
 """
 
+import hashlib
+import hmac
+import logging
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -32,6 +36,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
 
+from VENUAI import security_audit
+
+logger = logging.getLogger("drdo-rag")
+
 # ── Configuration ──────────────────────────────────────────────────────────
 # Loaded independently of rag_server.py so this module is self-contained and
 # testable/importable on its own (rag_server.py's load_dotenv() is a no-op
@@ -39,28 +47,44 @@ from pydantic import BaseModel, EmailStr, Field
 # regardless of the process's current working directory.
 load_dotenv(Path(__file__).parent / ".env")
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-if not JWT_SECRET_KEY:
-    raise RuntimeError(
-        "JWT_SECRET_KEY not set. Generate one with `python -c \"import secrets; "
-        "print(secrets.token_urlsafe(48))\"` and put it in your .env — the "
-        "server refuses to start with an insecure/default secret."
-    )
+from VENUAI.secret_policy import validate_jwt_secret  # noqa: E402  (single secret policy; see secret_policy.py)
+
+JWT_SECRET_KEY = validate_jwt_secret(os.getenv("JWT_SECRET_KEY"))
 JWT_ALGORITHM = "HS256"
+JWT_ISSUER = "venuai"
+JWT_AUDIENCE = "venuai-api"
 ACCESS_TOKEN_TTL_SECONDS = int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", "1800"))       # 30 min
 REFRESH_TOKEN_TTL_SECONDS = int(os.getenv("REFRESH_TOKEN_TTL_SECONDS", "1209600"))  # 14 days
+# A second use of a just-rotated refresh token within this window is treated as a
+# benign concurrent refresh (two tabs): rejected, but the family is NOT revoked.
+REFRESH_REUSE_GRACE_SECONDS = float(os.getenv("REFRESH_REUSE_GRACE_SECONDS", "5"))
+
+
+def _derive_key(purpose: str) -> bytes:
+    """Per-purpose signing key: a token minted for one purpose can never verify for another."""
+    return hmac.new(JWT_SECRET_KEY.encode(), f"venuai:{purpose}".encode(), hashlib.sha256).digest()
+
+
+def is_production() -> bool:
+    return (os.getenv("APP_ENV") or os.getenv("ENV") or "").strip().lower() in ("production", "prod")
+
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 DB_PATH = DATA_DIR / "users.db"
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+BCRYPT_ROUNDS = int(os.getenv("BCRYPT_ROUNDS", "12"))
+if is_production() and BCRYPT_ROUNDS < 12:
+    raise RuntimeError("BCRYPT_ROUNDS must be >= 12 in production.")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=BCRYPT_ROUNDS)
 _bearer = HTTPBearer(auto_error=False)
 
 VALID_ROLES = {"user", "admin"}
 MAX_FAILED_LOGIN_ATTEMPTS = 5
-LOGIN_LOCKOUT_SECONDS = 300  # 5 minutes
+LOGIN_LOCKOUT_SECONDS = 300  # first lockout; doubles per consecutive lockout, capped below
+LOGIN_LOCKOUT_MAX_SECONDS = 3600
+GENERIC_LOGIN_ERROR = "Invalid email or password."
 
 
 # ── Schema ──────────────────────────────────────────────────────────────────
@@ -129,6 +153,77 @@ def init_db() -> None:
             )
             """
         )
+        # S1 hardening migrations (idempotent ALTER-and-catch).
+        for _stmt in (
+            "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN lockout_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE refresh_tokens ADD COLUMN family_id TEXT",
+            "ALTER TABLE refresh_tokens ADD COLUMN parent_hash TEXT",
+            "ALTER TABLE refresh_tokens ADD COLUMN used_at REAL",
+        ):
+            try:
+                conn.execute(_stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_refresh_family ON refresh_tokens(family_id)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                token_hash     TEXT PRIMARY KEY,
+                user_id        TEXT NOT NULL,
+                pw_fingerprint TEXT NOT NULL,
+                expires_at     REAL NOT NULL,
+                used_at        REAL,
+                created_at     REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS oauth_identities (
+                provider   TEXT NOT NULL,
+                sub        TEXT NOT NULL,
+                user_id    TEXT NOT NULL,
+                email      TEXT,
+                created_at REAL NOT NULL,
+                PRIMARY KEY (provider, sub)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS oauth_states (
+                state_hash    TEXT PRIMARY KEY,
+                provider      TEXT NOT NULL,
+                binding_hash  TEXT NOT NULL,
+                code_verifier TEXT NOT NULL,
+                redirect_uri  TEXT NOT NULL,
+                expires_at    REAL NOT NULL,
+                used_at       REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tenant_invites (
+                token_hash TEXT PRIMARY KEY,
+                id         TEXT,
+                tenant_id  TEXT NOT NULL,
+                role       TEXT NOT NULL DEFAULT 'user',
+                email      TEXT,
+                created_by TEXT,
+                expires_at REAL NOT NULL,
+                used_at    REAL,
+                used_by    TEXT,
+                revoked    INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL
+            )
+            """
+        )
+        _inv_cols = {r[1] for r in conn.execute("PRAGMA table_info(tenant_invites)")}
+        for _col, _ddl in (("id", "TEXT"), ("used_by", "TEXT"), ("revoked", "INTEGER NOT NULL DEFAULT 0")):
+            if _col not in _inv_cols:
+                conn.execute(f"ALTER TABLE tenant_invites ADD COLUMN {_col} {_ddl}")
         conn.execute(
             "INSERT OR IGNORE INTO tenants (tenant_id, name, created_at) VALUES ('default', 'Default Organization', ?)",
             (time.time(),),
@@ -183,18 +278,23 @@ class AddTenantMemberRequest(BaseModel):
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    # Length/strength are enforced by enforce_password_policy() for a clear message.
+    password: str = Field(min_length=1, max_length=128)
     # If omitted, a brand-new tenant is created for this user (the "first
     # user creates an org" pattern most B2B SaaS products use). If provided,
     # the user joins that existing tenant — see create_user()'s docstring
     # for what's deliberately NOT built here (invite/approval flow).
-    organization_name: Optional[str] = None
-    tenant_id: Optional[str] = None
+    organization_name: Optional[str] = Field(default=None, max_length=200)
+    # Joining an existing tenant requires an invite token (see create_invite);
+    # a bare tenant_id is never sufficient.
+    tenant_id: Optional[str] = Field(default=None, max_length=64)
+    invite_token: Optional[str] = Field(default=None, max_length=200)
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    # Login keeps the legacy min length so pre-policy accounts can still sign in.
+    password: str = Field(min_length=1, max_length=128)
 
 
 class TokenResponse(BaseModel):
@@ -205,7 +305,7 @@ class TokenResponse(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(min_length=1, max_length=512)
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -213,8 +313,8 @@ class ForgotPasswordRequest(BaseModel):
 
 
 class ResetPasswordRequest(BaseModel):
-    token: str
-    new_password: str = Field(min_length=8, max_length=128)
+    token: str = Field(min_length=1, max_length=512)
+    new_password: str = Field(min_length=1, max_length=128)
 
 
 @dataclass
@@ -231,7 +331,56 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    return pwd_context.verify(password, hashed)
+    try:
+        return pwd_context.verify(password, hashed)
+    except ValueError:  # e.g. >72-byte input rejected by newer bcrypt builds
+        return False
+
+
+_DUMMY_HASH: Optional[str] = None
+
+
+def _dummy_verify(password: str) -> None:
+    """Burn a bcrypt verify so unknown/locked accounts cost the same as real ones."""
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = pwd_context.hash("venuai-timing-equaliser-" + secrets.token_hex(8))
+    verify_password(password, _DUMMY_HASH)
+
+
+# ── Password policy (signup + reset only; login keeps the legacy minimum) ────
+PASSWORD_MIN_LENGTH = 12
+PASSWORD_MAX_BYTES = 72  # bcrypt silently truncates beyond this -> reject instead
+_COMMON_PASSWORDS = {
+    "password", "password1", "password12", "password123", "password1234", "passw0rd1234",
+    "123456789012", "1234567890123", "qwertyuiop12", "qwerty123456", "qwertyuiopas",
+    "iloveyou1234", "letmein12345", "welcome12345", "administrator", "admin1234567",
+    "admin12345678", "changeme1234", "abcdefghijkl", "abc123456789", "111111111111",
+    "000000000000", "123123123123", "demo12345678", "p@ssw0rd1234", "monkey123456",
+    "dragon123456", "football1234", "baseball1234", "trustno1trustno1",
+}
+
+
+def password_policy_problems(password: str, email: Optional[str] = None) -> List[str]:
+    problems: List[str] = []
+    if len(password) < PASSWORD_MIN_LENGTH:
+        problems.append(f"at least {PASSWORD_MIN_LENGTH} characters")
+    if len(password.encode()) > PASSWORD_MAX_BYTES:
+        problems.append(f"at most {PASSWORD_MAX_BYTES} bytes")
+    low = password.lower()
+    if low in _COMMON_PASSWORDS or len(set(password)) < 5:
+        problems.append("not a common or repetitive password")
+    if email:
+        local = email.split("@")[0].lower()
+        if len(local) >= 4 and local in low:
+            problems.append("must not contain your email name")
+    return problems
+
+
+def enforce_password_policy(password: str, email: Optional[str] = None) -> None:
+    problems = password_policy_problems(password, email)
+    if problems:
+        raise HTTPException(status_code=422, detail="Password must be " + "; ".join(problems) + ".")
 
 
 # ── Tenant store ──────────────────────────────────────────────────────────
@@ -366,24 +515,42 @@ def list_tenant_members(tenant_id: str) -> List[UserOut]:
     return [UserOut(id=r["id"], email=r["email"], role=r["role"], tenant_id=r["tenant_id"]) for r in rows]
 
 
-def record_failed_login(email: str) -> None:
+def _lockout_duration(lockout_count: int) -> int:
+    """Exponential backoff: 5 min, 10 min, 20 min ... capped at 1 h."""
+    return min(LOGIN_LOCKOUT_SECONDS * (2 ** max(lockout_count - 1, 0)), LOGIN_LOCKOUT_MAX_SECONDS)
+
+
+def record_failed_login(email: str, ip: Optional[str] = None) -> None:
+    locked_until = None
     with _get_conn() as conn:
-        row = conn.execute("SELECT failed_attempts FROM users WHERE email = ?", (email.lower(),)).fetchone()
+        row = conn.execute(
+            "SELECT id, tenant_id, failed_attempts, locked_until, lockout_count FROM users WHERE email = ?",
+            (email.lower(),),
+        ).fetchone()
         if row is None:
             return
+        # Failures while already locked must not extend or escalate the lock.
+        if row["locked_until"] and time.time() < row["locked_until"]:
+            return
         attempts = row["failed_attempts"] + 1
-        locked_until = time.time() + LOGIN_LOCKOUT_SECONDS if attempts >= MAX_FAILED_LOGIN_ATTEMPTS else None
+        lockout_count = row["lockout_count"]
+        if attempts >= MAX_FAILED_LOGIN_ATTEMPTS:
+            lockout_count += 1
+            locked_until = time.time() + _lockout_duration(lockout_count)
+            attempts = 0
         conn.execute(
-            "UPDATE users SET failed_attempts = ?, locked_until = ? WHERE email = ?",
-            (attempts, locked_until, email.lower()),
+            "UPDATE users SET failed_attempts = ?, locked_until = ?, lockout_count = ? WHERE email = ?",
+            (attempts, locked_until, lockout_count, email.lower()),
         )
         conn.commit()
+    if locked_until:
+        security_audit.log("account_locked", row["id"], row["tenant_id"], ip, {"seconds": int(locked_until - time.time())})
 
 
 def reset_failed_login(email: str) -> None:
     with _get_conn() as conn:
         conn.execute(
-            "UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE email = ?",
+            "UPDATE users SET failed_attempts = 0, locked_until = NULL, lockout_count = 0 WHERE email = ?",
             (email.lower(),),
         )
         conn.commit()
@@ -394,22 +561,156 @@ def is_locked(user_row: sqlite3.Row) -> bool:
     return bool(locked_until) and time.time() < locked_until
 
 
+def authenticate(email: str, password: str, ip: Optional[str] = None) -> sqlite3.Row:
+    """Verify credentials. Every failure (unknown email, wrong password, locked
+    account) raises the identical 401 and costs one bcrypt verify, so neither
+    the message nor the timing reveals which case it was. Lockout is checked
+    BEFORE the password, so the correct password cannot bypass a lock."""
+    row = get_user_by_email(email)
+    if row is None:
+        _dummy_verify(password)
+        security_audit.log("login_failed", None, None, ip, {"reason": "unknown_email"})
+        raise HTTPException(status_code=401, detail=GENERIC_LOGIN_ERROR)
+    if is_locked(row):
+        _dummy_verify(password)
+        security_audit.log("login_blocked_locked", row["id"], row["tenant_id"], ip)
+        raise HTTPException(status_code=401, detail=GENERIC_LOGIN_ERROR)
+    if not verify_password(password, row["hashed_password"]):
+        record_failed_login(email, ip)
+        security_audit.log("login_failed", row["id"], row["tenant_id"], ip, {"reason": "bad_password"})
+        raise HTTPException(status_code=401, detail=GENERIC_LOGIN_ERROR)
+    reset_failed_login(email)
+    if pwd_context.needs_update(row["hashed_password"]):
+        with _get_conn() as conn:  # rehash-on-login: upgrade old cost factors transparently
+            conn.execute("UPDATE users SET hashed_password = ? WHERE id = ?", (hash_password(password), row["id"]))
+            conn.commit()
+    security_audit.log("login_ok", row["id"], row["tenant_id"], ip)
+    return row
+
+
+# ── Registration / invites ───────────────────────────────────────────────────
+INVITE_TTL_SECONDS = 7 * 24 * 3600
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def create_invite_record(
+    tenant_id: str, created_by: Optional[str] = None, role: str = "user",
+    email: Optional[str] = None, ttl_seconds: int = INVITE_TTL_SECONDS,
+) -> dict:
+    """The one invite implementation. Mint a single-use invite and return
+    {id, token, tenant_id, role, email, expires_at}; only the token's hash is stored."""
+    if role not in VALID_ROLES:
+        raise ValueError("invalid role")
+    raw = secrets.token_urlsafe(32)
+    invite_id = secrets.token_hex(8)
+    now = time.time()
+    with _get_conn() as conn:
+        conn.execute(
+            "INSERT INTO tenant_invites (token_hash, id, tenant_id, role, email, created_by, expires_at, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (_hash_token(raw), invite_id, tenant_id, role, email.lower() if email else None, created_by,
+             now + ttl_seconds, now),
+        )
+        conn.commit()
+    return {"id": invite_id, "token": raw, "tenant_id": tenant_id, "role": role,
+            "email": email.lower() if email else None, "expires_at": now + ttl_seconds}
+
+
+def create_invite(
+    tenant_id: str, created_by: Optional[str] = None, role: str = "user",
+    email: Optional[str] = None, ttl_seconds: int = INVITE_TTL_SECONDS,
+) -> str:
+    """Raw single-use token (shown once)."""
+    if role not in VALID_ROLES:
+        role = "user"
+    return create_invite_record(tenant_id, created_by, role, email, ttl_seconds)["token"]
+
+
+def _consume_invite(raw: str, email: Optional[str] = None) -> Optional[sqlite3.Row]:
+    """Atomically mark an invite used. None if unknown/expired/used/email-mismatch."""
+    h = _hash_token(raw)
+    with _get_conn() as conn:
+        row = conn.execute("SELECT * FROM tenant_invites WHERE token_hash = ?", (h,)).fetchone()
+        if row is None or row["revoked"] or row["used_at"] is not None or row["expires_at"] < time.time():
+            return None
+        if row["email"] and (not email or row["email"] != email.lower()):
+            return None
+        cur = conn.execute(
+            "UPDATE tenant_invites SET used_at = ?, used_by = ? WHERE token_hash = ? AND used_at IS NULL AND revoked = 0",
+            (time.time(), email.lower() if email else None, h)
+        )
+        conn.commit()
+        return row if cur.rowcount == 1 else None
+
+
+def _release_invite(raw: str) -> None:
+    with _get_conn() as conn:
+        conn.execute("UPDATE tenant_invites SET used_at = NULL WHERE token_hash = ?", (_hash_token(raw),))
+        conn.commit()
+
+
+def register_user(
+    email: str, password: str, organization_name: Optional[str] = None,
+    tenant_id: Optional[str] = None, invite_token: Optional[str] = None, ip: Optional[str] = None,
+) -> UserOut:
+    """Self-service signup. Applies the password policy; creates a personal
+    tenant unless a valid invite is presented. A bare `tenant_id` never joins
+    an existing tenant."""
+    enforce_password_policy(password, email)
+    if get_user_by_email(email) is not None:
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+
+    if invite_token or tenant_id:
+        invite = _consume_invite(invite_token, email) if invite_token else None
+        if invite is None or (tenant_id and tenant_id != invite["tenant_id"]):
+            security_audit.log("register_denied_tenant_join", None, tenant_id, ip, {"email": email.lower()})
+            raise HTTPException(status_code=403, detail="Joining an existing organization requires a valid invite.")
+        try:
+            user = create_user(email, password, role=invite["role"], tenant_id=invite["tenant_id"])
+        except HTTPException:
+            _release_invite(invite_token)
+            raise
+        security_audit.log("register_with_invite", user.id, user.tenant_id, ip)
+        return user
+
+    name = organization_name or f"{email.split('@')[0]}'s workspace"
+    # Someone who explicitly creates an organisation administers it (tenant admin of that tenant only);
+    # the implicit personal workspace stays a plain user.
+    user = create_user(email, password, role="admin" if organization_name else "user", organization_name=name)
+    security_audit.log("register", user.id, user.tenant_id, ip)
+    return user
+
+
 # ── JWT access tokens ─────────────────────────────────────────────────────────
-def create_access_token(user_id: str, role: str) -> str:
+def create_access_token(user_id: str, role: str, token_version: Optional[int] = None) -> str:
+    if token_version is None:
+        row = get_user_by_id(user_id)
+        token_version = row["token_version"] if row is not None else 0
     now = int(time.time())
     payload = {
         "sub": user_id,
         "role": role,
+        "tv": token_version,
         "iat": now,
         "exp": now + ACCESS_TOKEN_TTL_SECONDS,
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+        "jti": secrets.token_hex(8),
         "type": "access",
     }
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, _derive_key("access"), algorithm=JWT_ALGORITHM)
 
 
 def decode_access_token(token: str) -> dict:
     try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(
+            token, _derive_key("access"), algorithms=[JWT_ALGORITHM],
+            audience=JWT_AUDIENCE, issuer=JWT_ISSUER,
+            options={"require": ["exp", "iat", "sub", "jti", "aud", "iss"]},
+        )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Access token expired.")
     except jwt.InvalidTokenError:
@@ -419,96 +720,203 @@ def decode_access_token(token: str) -> dict:
     return payload
 
 
-# ── Password reset (Phase 5) ─────────────────────────────────────────────────
-PASSWORD_RESET_TTL_SECONDS = 30 * 60  # 30 minutes — real email delivery can lag; see email_service.py
+def bump_token_version(user_id: str) -> None:
+    """Instantly invalidates every outstanding access token for the user."""
+    with _get_conn() as conn:
+        conn.execute("UPDATE users SET token_version = token_version + 1 WHERE id = ?", (user_id,))
+        conn.commit()
+
+
+def set_user_role(user_id: str, role: str, actor_id: Optional[str] = None, ip: Optional[str] = None) -> None:
+    """Change a role; kills the user's access + refresh tokens so the old role
+    cannot linger in a live JWT. (S2's member-role route should call this.)"""
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role.")
+    row = get_user_by_id(user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    with _get_conn() as conn:
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+        conn.commit()
+    bump_token_version(user_id)
+    revoke_all_refresh_tokens(user_id)
+    security_audit.log("role_change", user_id, row["tenant_id"], ip, {"from": row["role"], "to": role, "actor": actor_id})
+
+
+# ── Password reset (single-use, hashed at rest, bound to current password) ──
+PASSWORD_RESET_TTL_SECONDS = 15 * 60
+
+
+def _pw_fingerprint(hashed_password: str) -> str:
+    return hashlib.sha256(hashed_password.encode()).hexdigest()
 
 
 def create_password_reset_token(user_id: str) -> str:
-    """A signed, short-lived JWT — same reasoning as oauth.py's state
-    token: a one-time value with its own built-in expiry doesn't need a
-    dedicated DB table to track it."""
-    now = int(time.time())
-    payload = {"sub": user_id, "iat": now, "exp": now + PASSWORD_RESET_TTL_SECONDS, "type": "password_reset"}
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
-
-
-def verify_password_reset_token(token: str) -> Optional[str]:
-    """Returns the user_id if the token is a valid, unexpired
-    password_reset token; None otherwise — never raises, since an
-    invalid/expired reset link is an expected, routine case for the
-    caller to turn into a 400, not an exceptional one."""
-    try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-    except jwt.PyJWTError:
-        return None
-    if payload.get("type") != "password_reset":
-        return None
-    return payload.get("sub")
-
-
-def update_password(user_id: str, new_password: str) -> None:
-    """Resets a user's password and revokes every existing refresh token
-    for them — a password reset is a real security event; any session
-    issued under the old password should not silently continue."""
-    hashed = hash_password(new_password)
+    """Random 32-byte token; only its hash is stored. Issuing a new one voids
+    every older unused token for the user. Bound to the CURRENT password hash,
+    so it dies the moment the password changes by any route."""
+    row = get_user_by_id(user_id)
+    if row is None:
+        raise ValueError("unknown user")
+    raw = secrets.token_urlsafe(32)
+    now = time.time()
     with _get_conn() as conn:
-        conn.execute("UPDATE users SET hashed_password = ? WHERE id = ?", (hashed, user_id))
-        conn.commit()
-    revoke_all_refresh_tokens(user_id)
-
-
-# ── Refresh tokens (opaque, hashed at rest, revocable) ─────────────────────────
-def _hash_token(token: str) -> str:
-    import hashlib
-    return hashlib.sha256(token.encode()).hexdigest()
-
-
-def issue_refresh_token(user_id: str) -> str:
-    raw = secrets.token_urlsafe(48)
-    with _get_conn() as conn:
+        conn.execute("UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL", (now, user_id))
         conn.execute(
-            "INSERT INTO refresh_tokens (token_hash, user_id, expires_at, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (_hash_token(raw), user_id, time.time() + REFRESH_TOKEN_TTL_SECONDS, time.time()),
+            "INSERT INTO password_reset_tokens (token_hash, user_id, pw_fingerprint, expires_at, created_at) VALUES (?,?,?,?,?)",
+            (_hash_token(raw), user_id, _pw_fingerprint(row["hashed_password"]), now + PASSWORD_RESET_TTL_SECONDS, now),
         )
         conn.commit()
     return raw
 
 
-def rotate_refresh_token(raw_token: str) -> tuple[str, str]:
-    """Validate + revoke the old refresh token, issue a new (access, refresh) pair."""
-    token_hash = _hash_token(raw_token)
+def verify_password_reset_token(token: str) -> Optional[str]:
+    """Non-consuming check: user_id if the token is currently valid, else None."""
     with _get_conn() as conn:
-        row = conn.execute(
-            "SELECT * FROM refresh_tokens WHERE token_hash = ?", (token_hash,)
-        ).fetchone()
-        if row is None or row["revoked"] or row["expires_at"] < time.time():
-            raise HTTPException(status_code=401, detail="Refresh token invalid or expired.")
-        conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE token_hash = ?", (token_hash,))
-        conn.commit()
-
-    user_row = get_user_by_id(row["user_id"])
-    if user_row is None:
-        raise HTTPException(status_code=401, detail="User no longer exists.")
-
-    new_access = create_access_token(user_row["id"], user_row["role"])
-    new_refresh = issue_refresh_token(user_row["id"])
-    return new_access, new_refresh
+        row = conn.execute("SELECT * FROM password_reset_tokens WHERE token_hash = ?", (_hash_token(token),)).fetchone()
+    if row is None or row["used_at"] is not None or row["expires_at"] < time.time():
+        return None
+    user = get_user_by_id(row["user_id"])
+    if user is None or _pw_fingerprint(user["hashed_password"]) != row["pw_fingerprint"]:
+        return None
+    return row["user_id"]
 
 
-def revoke_refresh_token(raw_token: str) -> None:
+def consume_password_reset_token(token: str) -> Optional[str]:
+    """Atomically spend the token (single use). Returns user_id or None."""
+    h = _hash_token(token)
     with _get_conn() as conn:
-        conn.execute(
-            "UPDATE refresh_tokens SET revoked = 1 WHERE token_hash = ?",
-            (_hash_token(raw_token),),
+        cur = conn.execute(
+            "UPDATE password_reset_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?",
+            (time.time(), h, time.time()),
         )
         conn.commit()
+        if cur.rowcount != 1:
+            return None
+        row = conn.execute("SELECT * FROM password_reset_tokens WHERE token_hash = ?", (h,)).fetchone()
+    user = get_user_by_id(row["user_id"])
+    if user is None or _pw_fingerprint(user["hashed_password"]) != row["pw_fingerprint"]:
+        return None
+    return row["user_id"]
+
+
+def update_password(user_id: str, new_password: str) -> None:
+    """Sets a new password; kills all access tokens (tv bump), all refresh
+    tokens, pending reset tokens, and clears any lockout."""
+    hashed = hash_password(new_password)
+    with _get_conn() as conn:
+        conn.execute(
+            "UPDATE users SET hashed_password = ?, token_version = token_version + 1, "
+            "failed_attempts = 0, locked_until = NULL, lockout_count = 0 WHERE id = ?",
+            (hashed, user_id),
+        )
+        conn.execute("UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL", (time.time(), user_id))
+        conn.commit()
+    revoke_all_refresh_tokens(user_id)
+
+
+# ── Refresh tokens (opaque, hashed at rest, families + reuse detection) ──────
+def issue_refresh_token(user_id: str, family_id: Optional[str] = None, parent_hash: Optional[str] = None) -> str:
+    raw = secrets.token_urlsafe(48)
+    h = _hash_token(raw)
+    with _get_conn() as conn:
+        conn.execute(
+            "INSERT INTO refresh_tokens (token_hash, user_id, expires_at, created_at, family_id, parent_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (h, user_id, time.time() + REFRESH_TOKEN_TTL_SECONDS, time.time(), family_id or secrets.token_hex(16), parent_hash),
+        )
+        conn.commit()
+    return raw
+
+
+def rotate_refresh_token(raw_token: str, ip: Optional[str] = None) -> tuple[str, str]:
+    """Atomic rotation. Presenting an already-rotated token (replay) revokes the
+    whole family — a thief and the victim both lose the session — and 401s.
+    BEGIN IMMEDIATE serialises concurrent rotations: exactly one wins."""
+    token_hash = _hash_token(raw_token)
+    conn = sqlite3.connect(DB_PATH, timeout=10, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    reuse = None
+    user_row = None
+    new_raw = ""
+    invalid = HTTPException(status_code=401, detail="Refresh token invalid or expired.")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM refresh_tokens WHERE token_hash = ?", (token_hash,)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            raise invalid
+        now = time.time()
+        if row["used_at"] is not None:
+            if now - row["used_at"] <= REFRESH_REUSE_GRACE_SECONDS:
+                conn.execute("ROLLBACK")  # benign concurrent refresh: reject, keep family
+                raise invalid
+            if row["family_id"]:
+                conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ?", (row["family_id"],))
+            else:
+                conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?", (row["user_id"],))
+            conn.execute("COMMIT")
+            reuse = row
+        elif row["revoked"] or row["expires_at"] < now:
+            conn.execute("ROLLBACK")
+            raise invalid
+        else:
+            user_row = conn.execute("SELECT * FROM users WHERE id = ?", (row["user_id"],)).fetchone()
+            if user_row is None:
+                conn.execute("ROLLBACK")
+                raise invalid
+            cur = conn.execute(
+                "UPDATE refresh_tokens SET revoked = 1, used_at = ? WHERE token_hash = ? AND revoked = 0 AND used_at IS NULL",
+                (now, token_hash),
+            )
+            if cur.rowcount != 1:
+                conn.execute("ROLLBACK")
+                raise invalid
+            new_raw = secrets.token_urlsafe(48)
+            conn.execute(
+                "INSERT INTO refresh_tokens (token_hash, user_id, expires_at, created_at, family_id, parent_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (_hash_token(new_raw), row["user_id"], now + REFRESH_TOKEN_TTL_SECONDS, now,
+                 row["family_id"] or secrets.token_hex(16), token_hash),
+            )
+            conn.execute("COMMIT")
+    finally:
+        conn.close()
+    if reuse is not None:
+        user = get_user_by_id(reuse["user_id"])
+        security_audit.log("refresh_reuse_detected", reuse["user_id"], user["tenant_id"] if user else None, ip,
+                           {"family_id": reuse["family_id"]})
+        raise invalid
+    new_access = create_access_token(user_row["id"], user_row["role"], user_row["token_version"])
+    return new_access, new_raw
+
+
+def revoke_refresh_token(raw_token: str) -> Optional[str]:
+    """Logout: revoke the token's whole family and bump the user's token_version
+    so outstanding access tokens die too. Returns the user_id (None if unknown)."""
+    h = _hash_token(raw_token)
+    with _get_conn() as conn:
+        row = conn.execute("SELECT user_id, family_id FROM refresh_tokens WHERE token_hash = ?", (h,)).fetchone()
+        if row is None:
+            return None
+        if row["family_id"]:
+            conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ?", (row["family_id"],))
+        else:
+            conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE token_hash = ?", (h,))
+        conn.commit()
+    bump_token_version(row["user_id"])
+    return row["user_id"]
 
 
 def revoke_all_refresh_tokens(user_id: str) -> None:
     with _get_conn() as conn:
         conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?", (user_id,))
         conn.commit()
+
+
+def logout_all(user_id: str) -> None:
+    bump_token_version(user_id)
+    revoke_all_refresh_tokens(user_id)
 
 
 # ── FastAPI dependencies ─────────────────────────────────────────────────────
@@ -525,6 +933,8 @@ def get_current_user(
     user_row = get_user_by_id(payload["sub"])
     if user_row is None:
         raise HTTPException(status_code=401, detail="User no longer exists.")
+    if payload.get("tv") != user_row["token_version"]:
+        raise HTTPException(status_code=401, detail="Access token revoked.")
     return AuthenticatedUser(
         id=user_row["id"], email=user_row["email"], role=user_row["role"],
         tenant_id=user_row["tenant_id"],
@@ -537,23 +947,68 @@ def require_admin(user: AuthenticatedUser = Depends(get_current_user)) -> Authen
     return user
 
 
-# ── Demo account seeding ──────────────────────────────────────────────────────
+# ── Demo / bootstrap account seeding ─────────────────────────────────────────
 def seed_demo_users() -> None:
     """
-    Seed two demo accounts on first run only, so the frontend's existing
-    'demo credentials' UI (clearly labeled as a demo, not a security feature)
-    keeps working end-to-end against *real* auth — hashed passwords, real
-    JWTs — rather than being backed by a client-side mock.
+    DEV convenience only. Seeds ONE demo user (demo@chat.com) into an empty
+    database unless SEED_DEMO_USER is falsy; always refused when
+    APP_ENV/ENV=production. No admin is ever seeded with a well-known password:
+    create one with `python -m VENUAI.auth create-admin` or the one-time
+    BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD environment variables.
     """
+    wants_demo = os.getenv("SEED_DEMO_USER", "true").strip().lower() not in ("0", "false", "no", "off")
+    if is_production():
+        if wants_demo and os.getenv("SEED_DEMO_USER") is not None:
+            logger.warning("[auth] SEED_DEMO_USER ignored: demo seeding is disabled in production.")
+        wants_demo = False
+    if wants_demo:
+        with _get_conn() as conn:
+            count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+        if count == 0:
+            try:
+                create_user("demo@chat.com", "demo12345", role="user")
+            except HTTPException:
+                pass  # seeded by a concurrent worker
+    bootstrap_admin_from_env()
+
+
+def bootstrap_admin_from_env() -> None:
+    email = (os.getenv("BOOTSTRAP_ADMIN_EMAIL") or "").strip()
+    password = os.getenv("BOOTSTRAP_ADMIN_PASSWORD") or ""
+    if not email or not password:
+        return
     with _get_conn() as conn:
-        count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
-    if count > 0:
+        has_admin = conn.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").fetchone()
+    if has_admin:
         return
     try:
-        create_user("demo@chat.com", "demo12345", role="user")
-        create_user("admin@chat.com", "admin12345", role="admin")
-    except HTTPException:
-        pass  # already seeded by a concurrent worker
+        enforce_password_policy(password, email)
+        user = create_user(email, password, role="admin", organization_name="Administration")
+        security_audit.log("bootstrap_admin_created", user.id, user.tenant_id)
+        logger.warning("[auth] Bootstrap admin created from environment; remove BOOTSTRAP_ADMIN_PASSWORD now.")
+    except HTTPException as e:
+        logger.error(f"[auth] BOOTSTRAP_ADMIN_* rejected: {e.detail}")
 
 
 seed_demo_users()
+
+
+if __name__ == "__main__":  # python -m VENUAI.auth create-admin
+    import argparse
+    import getpass
+
+    parser = argparse.ArgumentParser(prog="python -m VENUAI.auth")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    ca = sub.add_parser("create-admin", help="Create an admin user (password prompted, never echoed).")
+    ca.add_argument("--email", required=True)
+    args = parser.parse_args()
+    pw = getpass.getpass("Password: ")
+    if pw != getpass.getpass("Repeat password: "):
+        raise SystemExit("Passwords do not match.")
+    try:
+        enforce_password_policy(pw, args.email)
+        u = create_user(args.email, pw, role="admin", organization_name="Administration")
+    except HTTPException as e:
+        raise SystemExit(f"Error: {e.detail}")
+    security_audit.log("admin_created_cli", u.id, u.tenant_id)
+    print(f"Admin created: {u.email}")

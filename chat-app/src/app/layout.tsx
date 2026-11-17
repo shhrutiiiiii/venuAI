@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { ThemeProvider } from "@/contexts/ThemeContext";
+import ParticleBackground from "@/components/ParticleBackground";
 
 export const metadata: Metadata = {
   title: "DRDO VenuAI — Defence Scientific R&D Knowledge Engine",
@@ -38,7 +39,11 @@ export default function RootLayout({
       </head>
       <body className="antialiased transition-colors duration-300" suppressHydrationWarning>
         <ThemeProvider>
-          <AuthProvider>{children}</AuthProvider>
+          {/* App-wide animated background — fixed behind all page content. */}
+          <ParticleBackground />
+          <div className="relative z-1">
+            <AuthProvider>{children}</AuthProvider>
+          </div>
         </ThemeProvider>
       </body>
     </html>

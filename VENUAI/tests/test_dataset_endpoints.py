@@ -93,7 +93,7 @@ def test_other_user_cannot_delete_dataset(client, auth_headers):
     headers2 = {"Authorization": f"Bearer {login2.json()['access_token']}"}
 
     r = client.delete(f"/datasets/{dataset_id}", headers=headers2)
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 def test_owner_can_delete_dataset(client, auth_headers):
@@ -124,7 +124,7 @@ def test_analyze_returns_real_computed_values_and_chart(client, auth_headers, mo
     class _FakeGroqClient:
         def __init__(self):
             class _Completions:
-                def create(inner_self, model, messages, max_tokens, temperature):
+                def create(inner_self, model, messages, max_tokens, temperature, **_kw):
                     return _FakeResponse("Missiles category has the highest average revenue.")
 
             class _Chat:
@@ -132,7 +132,7 @@ def test_analyze_returns_real_computed_values_and_chart(client, auth_headers, mo
 
             self.chat = _Chat()
 
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient())
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient())
 
     upload = client.post(
         "/datasets/upload",
@@ -194,4 +194,4 @@ def test_other_user_cannot_analyze_private_dataset(client, auth_headers):
         json={"question": "anything"},
         headers=headers2,
     )
-    assert r.status_code == 403
+    assert r.status_code == 404

@@ -17,7 +17,7 @@ A single `/query` request can run through one of **three distinct execution path
 
 | Mode | Flag | Mechanism | Doc |
 |---|---|---|---|
-| Standard RAG | (default, both false) | LangGraph `StateGraph`: retrieve → generate → verify | [`workflows.md`](workflows.md) |
+| Standard RAG | (default, both false) | LangGraph `StateGraph`: retrieve → generate → verify (or retrieve → abstain) | [`workflows.md`](workflows.md), [`retrieval.md`](retrieval.md) |
 | ReAct agent | `agent_mode: true` | LangGraph prebuilt ReAct agent + `ALL_TOOLS` | [`workflows.md`](workflows.md), [`agents.md`](agents.md) |
 | Multi-agent | `multi_agent_mode: true` | `OrchestratorAgent`: classify → route to specialist(s) → synthesize | [`agents.md`](agents.md) |
 
@@ -25,7 +25,7 @@ Every mode ultimately calls Groq via the services documented in [`../Backend/ser
 
 ## Design Principles
 1. **Three modes, one response shape.** Regardless of mode, the caller always gets back a `QueryResponse` — see [`../Backend/api.md`](../Backend/api.md).
-2. **`grounding_score` still differs by mode; claim-level verification no longer does (Phase 5).** ReAct and multi-agent modes still return their own `grounding_score` approximation (a hardcoded constant or self-reported agent confidence) rather than `verify_node`'s `VerifierAgent` check — but all three modes now run the real `VerificationPipeline` and report genuine `evidence_coverage`/`critique_passed`, persisted to the Evidence Explorer — see [`workflows.md`](workflows.md) and [`evidence-explorer.md`](evidence-explorer.md) for the exact difference.
+2. **Scores are real or null.** The old hardcoded 0.9/0.8/0.7 grounding values are gone; ReAct and multi-agent use a light real check (token-overlap grounding + hallucination detector), streaming verifies after the last token, and unmeasured values are `null` with `verified=false` and a reason. Multi-agent `confidence` is now `retrieval_coverage` (a retrieval signal, not correctness). See [`trust-and-safety.md`](trust-and-safety.md).
 3. **Prompts are assembled, not hardcoded strings scattered per call site.** `context_engineer.py` centralizes ranking, history compression, and prompt budget logic — see [`prompts.md`](prompts.md).
 
 ## Workflow
@@ -46,15 +46,17 @@ A generated answer, sources, and quality scores (mode-dependent — see [`workfl
 - [`multimodal.md`](multimodal.md), [`vision.md`](vision.md) — real multimodal document extraction and the vision/OCR honesty boundary (Phase 2).
 - [`data-analyst.md`](data-analyst.md) — the Data Analyst Agent's full upload → analyze → chart UI path (Phase 1 agent, Phase 2 end-to-end wiring).
 - [`knowledge-graph.md`](knowledge-graph.md) — entity/relationship extraction, temporal relationships, SQLite/Postgres storage (Phase 3).
+- [`trust-and-safety.md`](trust-and-safety.md) — guardrails on every path, injection defence, quote-verified citations, fail-closed verification.
 - [`evidence-explorer.md`](evidence-explorer.md) — persisted claim-by-claim verification results, browsable after the fact (Phase 4).
 - [`code-sandbox.md`](code-sandbox.md) — real, Docker-isolated code execution for the ReAct agent (Phase 5).
+- [`observability.md`](observability.md) / [`agent-protocols.md`](agent-protocols.md) — tracing, online evals, tool platform, approvals, MCP 2025-11-25, A2A (Wave B / B3).
 - [`mcp-deployment.md`](mcp-deployment.md) — the MCP server's real SDK-compatibility fix and its new authenticated HTTP transport (Phase 5).
 
 ## Interactions with Other Services
 All three modes call out to Groq (see [`../Backend/services.md`](../Backend/services.md)); standard mode and multi-agent mode also call ChromaDB for retrieval.
 
 ## Security Considerations
-Guardrails run before any of these three modes are entered — see [`../Backend/architecture.md`](../Backend/architecture.md) Design Principle 2. None of the three modes re-check guardrails internally; a bypass of the top-level check would reach all three equally.
+Guardrails run before any of these three modes are entered — see [`../Backend/architecture.md`](../Backend/architecture.md) Design Principle 2. `/query/stream` and `/research` apply the same input guardrails; all answer paths also run output guardrails (see [`trust-and-safety.md`](trust-and-safety.md)).
 
 ## Performance Considerations
 Multi-agent mode is the most expensive: intent classification (1 call) + N specialist calls in parallel + a synthesis call if N>1 — see [`agents.md`](agents.md).

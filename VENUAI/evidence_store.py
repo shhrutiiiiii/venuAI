@@ -22,7 +22,7 @@ import uuid
 from pathlib import Path
 from typing import List, Optional
 
-DB_PATH = Path("VENUAI/data/evidence_explorer.db")
+DB_PATH = Path(__file__).resolve().parent / "data" / "evidence_explorer.db"   # cwd-independent
 
 
 def _get_conn() -> sqlite3.Connection:

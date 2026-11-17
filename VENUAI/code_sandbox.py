@@ -21,20 +21,73 @@ infrastructure actually existing — see Documents/AI/code-sandbox.md
 """
 
 import logging
+import os
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger("drdo-rag")
 
-SANDBOX_IMAGE = "python:3.12-slim"
+# Pin by digest in production: SANDBOX_IMAGE=python@sha256:<digest>. The explicit tag is the
+# fallback; the image is NEVER pulled at request time (see ensure_image_pulled / SANDBOX_AUTO_PULL).
+SANDBOX_IMAGE = os.getenv("SANDBOX_IMAGE", "python:3.12-slim")
 DEFAULT_TIMEOUT_SECONDS = 10
 MAX_TIMEOUT_SECONDS = 30
 MAX_OUTPUT_CHARS = 8000
 MEMORY_LIMIT = "256m"
 PIDS_LIMIT = "64"
+SANDBOX_USER = "65534:65534"        # nobody:nogroup
+MAX_CONCURRENT_PER_USER = int(os.getenv("SANDBOX_MAX_CONCURRENT_PER_USER", "2"))
+MAX_STDIN_CHARS = 100_000
+
+_running_lock = threading.Lock()
+_running_by_user: dict = {}
+
+
+class SandboxBusyError(RuntimeError):
+    """Per-user concurrency limit reached."""
+
+
+def build_docker_cmd(container_name: str) -> list:
+    """The hardened `docker run` command line (separate so tests can assert the flags)."""
+    return [
+        "docker", "run", "--rm", "-i",
+        "--name", container_name,
+        "--pull", "never",                       # no runtime pull; image must be provisioned at deploy time
+        "--network", "none",
+        "--memory", MEMORY_LIMIT,
+        "--memory-swap", MEMORY_LIMIT,           # no swap
+        "--pids-limit", PIDS_LIMIT,
+        "--cpus", "0.5",
+        "--cap-drop", "ALL",
+        "--user", SANDBOX_USER,
+        "--ipc", "none",
+        "--read-only",
+        "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+        "--security-opt", "no-new-privileges",
+        "--ulimit", "nofile=64:64",
+        "--ulimit", "fsize=1048576:1048576",
+        "--ulimit", "nproc=64:64",
+        "-e", "PYTHONDONTWRITEBYTECODE=1",
+        "-e", "HOME=/tmp",
+        SANDBOX_IMAGE, "python", "-",
+    ]
+
+
+class SandboxApprovalDenied(RuntimeError):
+    """The registered approval hook refused this execution (see set_approval_hook)."""
+
+
+_approval_hook: Optional[Callable[[str], bool]] = None
+
+
+def set_approval_hook(hook: Optional[Callable[[str], bool]]) -> None:
+    """Optional human-in-the-loop gate (Wave B / B3): `hook(code) -> bool`. Default None = no gate."""
+    global _approval_hook
+    _approval_hook = hook
 
 
 class SandboxUnavailableError(RuntimeError):
@@ -65,7 +118,57 @@ def is_available() -> bool:
         return False
 
 
-def run_python(code: str, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> SandboxResult:
+def _run_bounded(cmd: list, code: str, timeout: float, container_name: str):
+    """Run `cmd` feeding `code` on stdin, reading stdout/stderr with a hard byte cap AT READ TIME
+    (an output flood never gets buffered in full). Exceeding the cap kills the container."""
+    cap = MAX_OUTPUT_CHARS * 4
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    bufs = {"out": bytearray(), "err": bytearray()}
+    flooded = threading.Event()
+
+    def _drain(stream, key):
+        try:
+            while True:
+                chunk = stream.read(8192)
+                if not chunk:
+                    return
+                if len(bufs[key]) < cap:
+                    bufs[key].extend(chunk[: cap - len(bufs[key])])
+                else:
+                    flooded.set()
+                    return
+        except Exception:
+            return
+
+    threads = [threading.Thread(target=_drain, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=_drain, args=(proc.stderr, "err"), daemon=True)]
+    for t in threads:
+        t.start()
+    try:
+        proc.stdin.write(code.encode("utf-8"))
+        proc.stdin.close()
+    except OSError:
+        pass
+    deadline = time.time() + timeout
+    while proc.poll() is None:
+        if flooded.is_set():
+            proc.kill()
+            subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=10)
+            break
+        if time.time() > deadline:
+            proc.kill()
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        time.sleep(0.02)
+    for t in threads:
+        t.join(timeout=2)
+    dec = lambda b: bytes(b).decode("utf-8", errors="replace")[:MAX_OUTPUT_CHARS]
+    err = dec(bufs["err"])
+    if flooded.is_set():
+        err = (err + "\n[output truncated: limit exceeded, execution terminated]")[:MAX_OUTPUT_CHARS]
+    return dec(bufs["out"]), err, proc.returncode
+
+
+def run_python(code: str, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS, user_id: str = "anonymous") -> SandboxResult:
     """
     Execute `code` as Python 3 inside an ephemeral, network-disabled
     Docker container. Code is passed over stdin to `python -` (never via
@@ -79,39 +182,47 @@ def run_python(code: str, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> San
     container crash or Docker error surfaces as a real, non-zero
     `exit_code` with the real stderr, not a swallowed exception.
     """
+    # Defence in depth: every caller (agent tool, API route, MCP) hits the operator switch here.
+    from VENUAI.policy_engine import code_execution_enabled
+    if not code_execution_enabled():
+        raise SandboxUnavailableError(
+            "Code execution is disabled on this deployment (operator must set ENABLE_CODE_EXECUTION=1)."
+        )
+    if _approval_hook is not None and not _approval_hook(code):
+        raise SandboxApprovalDenied("code execution was not approved")
     if not is_available():
         raise SandboxUnavailableError(
             "Docker is not available on this host — sandboxed code execution requires a "
             "running Docker daemon (see VENUAI/code_sandbox.py is_available())."
         )
 
-    timeout_seconds = min(max(1, timeout_seconds), MAX_TIMEOUT_SECONDS)
-    container_name = f"venuai-sandbox-{uuid.uuid4().hex[:12]}"
+    with _running_lock:
+        if _running_by_user.get(user_id, 0) >= MAX_CONCURRENT_PER_USER:
+            raise SandboxBusyError("too many concurrent sandbox executions")
+        _running_by_user[user_id] = _running_by_user.get(user_id, 0) + 1
+    try:
+        return _run_python_locked(code, timeout_seconds, container_name_prefix="venuai-sandbox")
+    finally:
+        with _running_lock:
+            _running_by_user[user_id] = max(0, _running_by_user.get(user_id, 1) - 1)
 
-    cmd = [
-        "docker", "run", "--rm", "-i",
-        "--name", container_name,
-        "--network", "none",
-        "--memory", MEMORY_LIMIT,
-        "--pids-limit", PIDS_LIMIT,
-        "--read-only",
-        "--tmpfs", "/tmp:rw,size=16m",
-        "--security-opt", "no-new-privileges",
-        "--cpus", "0.5",
-        SANDBOX_IMAGE, "python", "-",
-    ]
+
+def _run_python_locked(code: str, timeout_seconds: int, container_name_prefix: str) -> SandboxResult:
+    timeout_seconds = min(max(1, timeout_seconds), MAX_TIMEOUT_SECONDS)
+    container_name = f"{container_name_prefix}-{uuid.uuid4().hex[:12]}"
+
+    if len(code) > MAX_STDIN_CHARS:
+        raise ValueError("code too large")
+    cmd = build_docker_cmd(container_name)
 
     t_start = time.time()
     try:
-        proc = subprocess.run(
-            cmd, input=code, capture_output=True, text=True,
-            timeout=timeout_seconds + 5,  # generous outer bound beyond the container's own limits
-        )
+        out, err, rc = _run_bounded(cmd, code, timeout_seconds + 5, container_name)
         duration = time.time() - t_start
         return SandboxResult(
-            stdout=proc.stdout[:MAX_OUTPUT_CHARS],
-            stderr=proc.stderr[:MAX_OUTPUT_CHARS],
-            exit_code=proc.returncode,
+            stdout=out,
+            stderr=err,
+            exit_code=rc,
             timed_out=False,
             duration_seconds=round(duration, 3),
         )
@@ -165,6 +276,9 @@ def ensure_image_pulled() -> bool:
         )
         if inspect.returncode == 0:
             return True
+        if os.getenv("SANDBOX_AUTO_PULL", "0") != "1":
+            logger.warning("[code_sandbox] image %s not present and SANDBOX_AUTO_PULL!=1; provision it at deploy time", SANDBOX_IMAGE)
+            return False
         pull = subprocess.run(["docker", "pull", SANDBOX_IMAGE], capture_output=True, timeout=300)
         return pull.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:

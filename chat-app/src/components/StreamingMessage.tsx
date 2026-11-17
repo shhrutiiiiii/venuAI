@@ -2,17 +2,20 @@
 
 import React, { useEffect, useState } from "react";
 import FormattedMarkdown from "./FormattedMarkdown";
+import type { Citation } from "@/lib/answerTypes";
 
 interface StreamingMessageProps {
   content: string;
   isStreaming?: boolean;
   speedMs?: number;
+  citations?: Citation[];
 }
 
 export const StreamingMessage: React.FC<StreamingMessageProps> = ({
   content,
   isStreaming = false,
   speedMs = 15,
+  citations,
 }) => {
   const [displayedText, setDisplayedText] = useState("");
 
@@ -40,7 +43,7 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
 
   return (
     <div className="relative">
-      <FormattedMarkdown content={textToRender} />
+      <FormattedMarkdown content={textToRender} citations={citations} />
       {isStreaming && (
         <span className="inline-block w-2 h-4 ml-1 bg-purple-400 animate-pulse rounded-xs vertical-middle" />
       )}

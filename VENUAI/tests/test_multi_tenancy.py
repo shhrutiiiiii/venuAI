@@ -55,24 +55,26 @@ def _register_and_login(client, email, password, organization_name=None, tenant_
 
 
 def test_registering_with_organization_name_creates_a_new_tenant(client):
-    user, _ = _register_and_login(client, "founder@neworg.com", "password123", organization_name="New Org Inc")
+    user, _ = _register_and_login(client, "founder@neworg.com", "Str0ng-Test-Pw-123", organization_name="New Org Inc")
     assert user["tenant_id"] != "default"
 
 
-def test_registering_without_organization_name_joins_default_tenant(client):
-    user, _ = _register_and_login(client, "nobody@test.com", "password123")
-    assert user["tenant_id"] == "default"
+def test_registering_without_organization_name_gets_a_personal_tenant(client):
+    user, _ = _register_and_login(client, "nobody@test.com", "Str0ng-Test-Pw-123")
+    assert user["tenant_id"] != "default"
 
 
-def test_registering_with_unknown_tenant_id_fails(client):
+def test_registering_with_a_guessed_tenant_id_and_no_invite_is_refused(client, isolated_auth_db):
+    # "default" exists, so it is the obvious target; no invite -> 403, never joined.
     r = client.post("/auth/register", json={
-        "email": "x@test.com", "password": "password123", "tenant_id": "does-not-exist",
+        "email": "x@test.com", "password": "Str0ng-Test-Pw-123", "tenant_id": "default",
     })
-    assert r.status_code == 404
+    assert r.status_code == 403
+    assert isolated_auth_db.get_user_by_email("x@test.com") is None
 
 
 def test_auth_tenant_endpoint_returns_own_tenant(client):
-    user, headers = _register_and_login(client, "owner@acme.com", "password123", organization_name="Acme Corp")
+    user, headers = _register_and_login(client, "owner@acme.com", "Str0ng-Test-Pw-123", organization_name="Acme Corp")
     r = client.get("/auth/tenant", headers=headers)
     assert r.status_code == 200
     body = r.json()
@@ -81,14 +83,19 @@ def test_auth_tenant_endpoint_returns_own_tenant(client):
 
 
 def test_second_user_joining_existing_tenant_shares_it(client):
-    user1, _ = _register_and_login(client, "owner2@acme.com", "password123", organization_name="Acme Corp 2")
-    user2, _ = _register_and_login(client, "teammate@acme.com", "password123", tenant_id=user1["tenant_id"])
-    assert user2["tenant_id"] == user1["tenant_id"]
+    user1, _ = _register_and_login(client, "owner2@acme.com", "Str0ng-Test-Pw-123", organization_name="Acme Corp 2")
+    from VENUAI import auth
+    invite = auth.create_invite(user1["tenant_id"], created_by=user1["id"])
+    reg = client.post("/auth/register", json={
+        "email": "teammate@acme.com", "password": "Str0ng-Test-Pw-123", "invite_token": invite,
+    })
+    assert reg.status_code == 201, reg.text
+    assert reg.json()["tenant_id"] == user1["tenant_id"]
 
 
 def test_dataset_invisible_across_tenants(client):
-    _, headers_a = _register_and_login(client, "a@tenant-a.com", "password123", organization_name="Tenant A")
-    _, headers_b = _register_and_login(client, "b@tenant-b.com", "password123", organization_name="Tenant B")
+    _, headers_a = _register_and_login(client, "a@tenant-a.com", "Str0ng-Test-Pw-123", organization_name="Tenant A")
+    _, headers_b = _register_and_login(client, "b@tenant-b.com", "Str0ng-Test-Pw-123", organization_name="Tenant B")
 
     upload = client.post(
         "/datasets/upload", files={"file": ("sales.csv", _real_csv_bytes(), "text/csv")}, headers=headers_a,
@@ -107,8 +114,8 @@ def test_dataset_invisible_across_tenants(client):
 
 
 def test_multimodal_document_invisible_across_tenants(client):
-    _, headers_a = _register_and_login(client, "a2@tenant-a.com", "password123", organization_name="Tenant A2")
-    _, headers_b = _register_and_login(client, "b2@tenant-b.com", "password123", organization_name="Tenant B2")
+    _, headers_a = _register_and_login(client, "a2@tenant-a.com", "Str0ng-Test-Pw-123", organization_name="Tenant A2")
+    _, headers_b = _register_and_login(client, "b2@tenant-b.com", "Str0ng-Test-Pw-123", organization_name="Tenant B2")
 
     upload = client.post(
         "/upload/multimodal",
@@ -131,7 +138,7 @@ def test_admin_does_not_see_other_tenants_documents(client, isolated_auth_db):
     (tenant "default") must not see a document uploaded inside a
     different, newly-created tenant.
     """
-    _, headers_other = _register_and_login(client, "c@tenant-c.com", "password123", organization_name="Tenant C")
+    _, headers_other = _register_and_login(client, "c@tenant-c.com", "Str0ng-Test-Pw-123", organization_name="Tenant C")
     upload = client.post(
         "/upload/multimodal",
         files={"file": ("doc.pdf", _build_sample_pdf_bytes(), "application/pdf")},

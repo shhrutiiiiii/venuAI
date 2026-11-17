@@ -1,21 +1,40 @@
 "use client";
 
 import React from "react";
-import { ShieldCheck, AlertTriangle, ShieldAlert } from "lucide-react";
+import { ShieldCheck, AlertTriangle, ShieldAlert, ShieldQuestion } from "lucide-react";
 
 interface ConfidenceBadgeProps {
-  score: number;
-  hallucinationScore?: number;
+  /** null/undefined => not measured: renders "Unverified", never a made-up number. */
+  score?: number | null;
+  verified?: boolean | null;
+  reason?: string;
+  hallucinationScore?: number | null;
   className?: string;
 }
 
 export const ConfidenceBadge: React.FC<ConfidenceBadgeProps> = ({
   score,
+  verified,
+  reason,
   hallucinationScore,
   className = "",
 }) => {
-  // Normalize score between 0 and 1
-  const validScore = Math.min(Math.max(score || 0, 0), 1);
+  const measured = typeof score === "number" && Number.isFinite(score) && verified !== false;
+
+  if (!measured) {
+    return (
+      <div
+        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${className}`}
+        style={{ background: "var(--badge-bg)", borderColor: "var(--badge-border)", color: "var(--text-muted)" }}
+        title={reason || "Grounding was not verified for this answer."}
+      >
+        <ShieldQuestion className="w-3.5 h-3.5" />
+        <span>Unverified</span>
+      </div>
+    );
+  }
+
+  const validScore = Math.min(Math.max(score as number, 0), 1);
   const percentage = Math.round(validScore * 100);
 
   let colorClasses = "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
@@ -32,10 +51,11 @@ export const ConfidenceBadge: React.FC<ConfidenceBadgeProps> = ({
     label = "Medium Grounding";
   }
 
+  const hall = typeof hallucinationScore === "number" ? ` | Hallucination Index: ${hallucinationScore.toFixed(2)}` : "";
   return (
     <div
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border shadow-xs transition-all hover:scale-105 cursor-pointer ${colorClasses} ${className}`}
-      title={`Grounding Score: ${percentage}% | Hallucination Index: ${(hallucinationScore || 0).toFixed(2)}`}
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border shadow-xs ${colorClasses} ${className}`}
+      title={`Grounding Score: ${percentage}%${hall}`}
     >
       {icon}
       <span>{label}</span>

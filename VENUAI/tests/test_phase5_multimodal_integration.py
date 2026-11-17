@@ -81,7 +81,7 @@ def test_react_tool_region_fold_in_respects_allowed_doc_ids(monkeypatch):
 # ── Multi-agent specialist retrieval (BaseSpecialistAgent.query) ────────────
 
 class _FakeChatCompletions:
-    def create(self, model, messages, max_tokens, temperature):
+    def create(self, model, messages, max_tokens, temperature, **_kw):
         class _Choice:
             class message:
                 content = "fake specialist answer"
@@ -123,7 +123,7 @@ class _FakeStreamChunk:
 
 
 class _FakeStreamCompletions:
-    def create(self, model, messages, max_tokens, temperature, stream):
+    def create(self, model, messages, max_tokens, temperature, stream=True, **_kw):
         return iter([_FakeStreamChunk("The range is 5000 km.")])
 
 
@@ -144,7 +144,8 @@ def auth_headers(client):
 def test_query_stream_folds_in_multimodal_region_hit(client, auth_headers, monkeypatch):
     monkeypatch.setattr(rag_server, "get_vector_store", lambda: _EmptyFakeVectorStore())
     monkeypatch.setattr(rag_server, "load_metadata", _multimodal_metadata)
-    monkeypatch.setattr("groq.Groq", _FakeStreamGroqClient)
+    from VENUAI.ai_gateway import gateway as _gw
+    monkeypatch.setattr(_gw, "_gateway", _gw.AIGateway(_FakeStreamGroqClient()))
 
     r = client.post(
         "/query/stream", json={"question": "What is the range parameter?"}, headers=auth_headers,

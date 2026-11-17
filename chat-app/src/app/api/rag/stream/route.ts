@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { authHeader } from "@/lib/serverAuthHeader";
+import { readJsonCapped } from "@/lib/requestLimits";
 
 const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
 
@@ -9,7 +10,9 @@ const RAG_SERVER = process.env.RAG_SERVER_URL || "http://127.0.0.1:8000";
  */
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const parsed = await readJsonCapped(req);
+    if (!parsed.ok) return parsed.res;
+    const body = parsed.body;
 
     const backendResponse = await fetch(`${RAG_SERVER}/query/stream`, {
       method: "POST",

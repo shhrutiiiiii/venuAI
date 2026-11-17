@@ -9,6 +9,11 @@ import React, {
   ReactNode,
 } from "react";
 import { AuthUser, getSessionUser, logout as apiLogout } from "@/lib/authClient";
+import { installCsrfFetch } from "@/lib/csrf";
+
+// Module scope (not an effect) so the CSRF header is in place before any child
+// component's mount-time fetch runs.
+installCsrfFetch();
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

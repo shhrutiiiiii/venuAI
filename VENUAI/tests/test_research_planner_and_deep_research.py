@@ -32,7 +32,7 @@ class _FakeGroqClient:
         outer = self
 
         class _Completions:
-            def create(inner_self, model, messages, max_tokens, temperature):
+            def create(inner_self, model, messages, max_tokens, temperature, **_kw):
                 idx = min(outer.calls, len(outer._responses) - 1)
                 outer.calls += 1
                 return _FakeResponse(outer._responses[idx])
@@ -131,7 +131,7 @@ def test_deep_research_single_subquestion_skips_synthesis_call(monkeypatch):
     # First call = planner (empty → fallback to single subquestion).
     # Second call = AgenticRAG's generation call.
     client = _FakeGroqClient(["", "The Agni-V missile has a range of 5000 km."])
-    monkeypatch.setattr("groq.Groq", lambda api_key: client)
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: client)
 
     result = DeepResearchAgent().research("What is the range of the Agni-V missile?", client)
 
@@ -157,7 +157,7 @@ def test_deep_research_multi_subquestion_runs_synthesis(monkeypatch):
         "It was developed by DRDL.",                       # subq 2 generation
         "The Agni-V has a range of 5000 km and was developed by DRDL.",  # synthesis
     ])
-    monkeypatch.setattr("groq.Groq", lambda api_key: client)
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: client)
 
     result = DeepResearchAgent().research("Tell me about the Agni-V.", client)
 
@@ -176,7 +176,7 @@ def test_deep_research_respects_authorization(monkeypatch):
     ]
     monkeypatch.setattr(rag_server, "get_vector_store", lambda: _FakeVectorStore(docs))
     client = _FakeGroqClient(["", "My own document content."])
-    monkeypatch.setattr("groq.Groq", lambda api_key: client)
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: client)
 
     result = DeepResearchAgent().research("question", client, allowed_doc_ids=["doc-mine"])
 

@@ -32,7 +32,7 @@ class _FakeGroqClient:
         outer = self
 
         class _Completions:
-            def create(self, model, messages, max_tokens, temperature):
+            def create(self, model, messages, max_tokens, temperature, **_kw):
                 outer.calls += 1
                 return _FakeResponse(outer.response_text)
 
@@ -68,7 +68,7 @@ def test_check_consistency_actually_calls_the_model_for_no(monkeypatch):
     assert result is False
 
 
-def test_check_consistency_fails_open_only_on_genuine_failure(monkeypatch):
+def test_check_consistency_returns_unknown_not_true_on_failure(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "fake-key")
 
     class _BrokenClient:
@@ -80,4 +80,4 @@ def test_check_consistency_fails_open_only_on_genuine_failure(monkeypatch):
 
     verifier = VerifierAgent(_BrokenClient())
     result = verifier.check_consistency("anything", "anything")
-    assert result is True  # fail-open is still correct behavior for a genuine failure
+    assert result is None  # fail-closed: unknown is never reported as 'consistent'

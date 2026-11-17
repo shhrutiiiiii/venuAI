@@ -127,7 +127,7 @@ def test_react_agent_persists_an_evidence_record_and_real_sources(client, auth_h
     monkeypatch.setattr("langgraph.prebuilt.create_react_agent", _fake_create_react_agent)
     monkeypatch.setattr("langchain_groq.ChatGroq", lambda **kwargs: object())
     monkeypatch.setattr(rag_server, "get_vector_store", lambda: _TextHitVectorStore())
-    monkeypatch.setattr(rag_server, "load_metadata", lambda: {})
+    monkeypatch.setattr(rag_server, "load_metadata", lambda: {"doc-1": {"owner_id": "x", "classification": "PUBLIC", "tenant_id": "default"}})
     monkeypatch.setattr(
         "VENUAI.verification_pipeline.get_verification_pipeline", lambda: _FakeVerificationPipeline(),
     )

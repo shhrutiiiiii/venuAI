@@ -5,22 +5,67 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Install backend dependencies
-        run: pip install -r VENUAI/requirements.txt
+        run: |
+          pip install --require-hashes -r VENUAI/requirements.lock
+          pip install "pytest>=8.3,<10" "pytest-asyncio>=0.24,<2"
       - name: Run backend test suite
         env:
           GROQ_API_KEY: ci-placeholder-not-a-real-key
-          GROQ_MODEL: llama-3.3-70b-versatile
+          GROQ_MODEL: openai/gpt-oss-120b
           JWT_SECRET_KEY: ci-only-secret-never-used-outside-ci-runners
         run: pytest VENUAI/tests/ -v
+      - name: Security regression tests
+        env:
+          GROQ_API_KEY: ci-placeholder-not-a-real-key
+          JWT_SECRET_KEY: ci-only-secret-never-used-outside-ci-runners
+        run: pytest -m security VENUAI/tests -q
+
+  evals:
+    runs-on: ubuntu-latest
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      JWT_SECRET_KEY: ci-only-secret-never-used-outside-ci-runners
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install backend dependencies
+        run: |
+          pip install --require-hashes -r VENUAI/requirements.lock
+          pip install "pytest>=8.3,<10" "pytest-asyncio>=0.24,<2"
+      - name: Eval metric/harness unit tests (deterministic, no network)
+        run: pytest VENUAI/tests/test_eval_harness.py VENUAI/tests/test_retrieval_metrics.py -q
+      - name: Live eval (only when GROQ_API_KEY secret exists)
+        run: |
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "GROQ_API_KEY secret not set - skipping live eval"
+          else
+            python -m VENUAI.evals.eval_runner run --limit 10 --judge --gate --out-dir eval-out
+          fi
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: eval-report
+          path: eval-out
+          if-no-files-found: ignore
 
   frontend:
     runs-on: ubuntu-latest
@@ -28,10 +73,10 @@ jobs:
       run:
         working-directory: chat-app
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: chat-app/package-lock.json
       - name: Install frontend dependencies

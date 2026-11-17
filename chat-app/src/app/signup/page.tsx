@@ -42,7 +42,7 @@ export default function SignupPage() {
   return (
     <main
       className="relative min-h-screen w-full flex items-center justify-center px-5 py-10 transition-colors duration-250"
-      style={{ background: "var(--bg-main)", color: "var(--text-main)" }}
+      style={{ color: "var(--text-main)" }}
     >
       <div className="absolute top-5 right-5 z-50">
         <ThemeToggle showLabel />

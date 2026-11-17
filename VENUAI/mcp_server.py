@@ -42,6 +42,7 @@ caller per connection" (a local stdio client, or one bearer-token-holding
 HTTP client).
 """
 
+import contextvars
 import hmac
 import json
 import logging
@@ -84,6 +85,72 @@ def _load_metadata() -> dict:
     return {}
 
 
+# ── Principal / tenant scoping, upload allowlist (Wave B / B3) ───────────────────
+
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+_principal_var: contextvars.ContextVar = contextvars.ContextVar("mcp_principal", default=None)
+
+
+def current_principal():
+    """Caller identity for this MCP request: a real VenuAI user (JWT bearer) or the
+    operator principal (static MCP_API_KEY / stdio) scoped to MCP_TENANT_ID."""
+    p = _principal_var.get()
+    if p is not None:
+        return p
+    from VENUAI.auth import AuthenticatedUser
+    return AuthenticatedUser(id="mcp-operator", email="mcp-operator@local", role="admin",
+                             tenant_id=os.getenv("MCP_TENANT_ID", "default"))
+
+
+def _visible_doc_ids(principal):
+    """Same visibility rule as rag_server.get_visible_doc_ids (tenant + owner/PUBLIC)."""
+    meta = _load_metadata()
+    tenant_docs = {k: v for k, v in meta.items() if v.get("tenant_id", "default") == principal.tenant_id}
+    if principal.role == "admin":
+        return list(tenant_docs)
+    return [k for k, v in tenant_docs.items()
+            if v.get("owner_id") == principal.id or v.get("classification") == "PUBLIC"]
+
+
+def _scoped_metadata() -> dict:
+    """Document metadata restricted to what the current principal may see."""
+    p = current_principal()
+    allowed = set(_visible_doc_ids(p))
+    return {k: v for k, v in _load_metadata().items() if k in allowed}
+
+
+def upload_dir() -> Path:
+    return Path(os.getenv("MCP_UPLOAD_DIR", str(BASE_DIR / "data" / "mcp_uploads"))).resolve()
+
+
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+def resolve_upload_path(file_path: str):
+    """Resolve `file_path` strictly inside the upload allowlist directory.
+    Returns (Path, None) or (None, error). Symlinks/`..`/absolute escapes are rejected."""
+    root = upload_dir()
+    try:
+        cand = Path(file_path)
+        cand = (cand if cand.is_absolute() else root / cand).resolve()
+        cand.relative_to(root)
+    except (ValueError, OSError):
+        return None, "Upload refused: path is outside the allowed upload directory."
+    if not cand.is_file():
+        return None, "File not found in the upload directory."
+    if cand.suffix.lower() != ".pdf":
+        return None, "Only PDF files are supported."
+    if cand.stat().st_size > MAX_UPLOAD_BYTES:
+        return None, "File too large (25 MB limit)."
+    try:
+        with open(cand, "rb") as fh:
+            if fh.read(5) != b"%PDF-":
+                return None, "File content is not a PDF."
+    except OSError:
+        return None, "File not found in the upload directory."
+    return cand, None
+
+
 # ── Resources ───────────────────────────────────────────────────────────────────
 
 @mcp.resource("drdo://documents")
@@ -92,7 +159,7 @@ def list_all_documents() -> str:
     List all documents currently ingested into the DRDO knowledge base.
     Returns a formatted Markdown table with ID, filename, pages, upload date, and tags.
     """
-    meta = _load_metadata()
+    meta = _scoped_metadata()
     if not meta:
         return "The DRDO knowledge base is empty. No documents have been uploaded."
 
@@ -117,7 +184,7 @@ def get_document(doc_id: str) -> str:
     Args:
         doc_id: The document UUID (full or first 8 characters).
     """
-    meta = _load_metadata()
+    meta = _scoped_metadata()
     # Support partial ID matching (first 8 chars)
     matched = None
     for k, v in meta.items():
@@ -169,32 +236,32 @@ def search_drdo_knowledge_base(query: str, top_k: int = 5) -> str:
         top_k : Number of results to return (default 5).
     """
     try:
-        from VENUAI.agent_tools import drdo_kb_search
-        return drdo_kb_search.invoke({"query": query, "top_k": top_k})
+        from VENUAI.agent_tools import _search_kb
+        p = current_principal()
+        return _search_kb(query, max(1, min(int(top_k), 20)), allowed_doc_ids=_visible_doc_ids(p))
     except Exception as e:
-        return f"Search failed: {str(e)}"
+        logger.error("tool failed: %s", type(e).__name__, exc_info=e)
+        return f"Search failed: ({type(e).__name__}; details in server log)"
 
 
 @mcp.tool()
 def upload_document(file_path: str) -> str:
     """
     Ingest a PDF document into the DRDO knowledge base.
-    Provide the absolute file path to the PDF.
+    Only files inside the operator-configured upload directory
+    (MCP_UPLOAD_DIR, default VENUAI/data/mcp_uploads) can be read.
 
     Args:
-        file_path: Absolute path to a PDF file on the server's filesystem.
+        file_path: File name (or path) of a PDF inside the upload directory.
     """
     import urllib.request
     import urllib.error
 
-    path = Path(file_path)
-    if not path.exists():
-        return f"File not found: {file_path}"
-    if not path.suffix.lower() == ".pdf":
-        return "Only PDF files are supported."
+    path, err = resolve_upload_path(file_path)
+    if err:
+        return err
 
     try:
-        import urllib.request
         with open(path, "rb") as f:
             data = f.read()
 
@@ -205,10 +272,15 @@ def upload_document(file_path: str) -> str:
             f"Content-Type: application/pdf\r\n\r\n"
         ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
 
+        token = os.getenv("VENUAI_API_TOKEN", "")
+        if not token:
+            return ("Upload failed: VENUAI_API_TOKEN is not set (the backend's /upload requires "
+                    "an authenticated user).")
         req = urllib.request.Request(
-            "http://127.0.0.1:8000/upload",
+            os.getenv("MCP_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/") + "/upload",
             data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                     "Authorization": f"Bearer {token}"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=120) as resp:
@@ -219,7 +291,8 @@ def upload_document(file_path: str) -> str:
             f"**Pages:** {result['pages']} | **Chunks:** {result['chunks']}"
         )
     except Exception as e:
-        return f"Upload failed: {str(e)}"
+        logger.error("tool failed: %s", type(e).__name__, exc_info=e)
+        return f"Upload failed: ({type(e).__name__}; details in server log)"
 
 
 @mcp.tool()
@@ -242,9 +315,11 @@ def query_with_rag(question: str, session_id: str = "") -> str:
 
     try:
         req = urllib.request.Request(
-            "http://127.0.0.1:8000/query",
+            os.getenv("MCP_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/") + "/query",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json",
+                     **({"Authorization": "Bearer " + os.getenv("VENUAI_API_TOKEN", "")}
+                        if os.getenv("VENUAI_API_TOKEN") else {})},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -266,7 +341,8 @@ def query_with_rag(question: str, session_id: str = "") -> str:
             f"📚 **Sources:**\n{sources_md or 'Preloaded knowledge base.'}"
         )
     except Exception as e:
-        return f"RAG query failed: {str(e)}\n\nEnsure rag_server.py is running on port 8000."
+        logger.error("tool failed: %s", type(e).__name__, exc_info=e)
+        return f"RAG query failed: ({type(e).__name__}; details in server log)\n\nEnsure rag_server.py is running on port 8000."
 
 
 # ── Prompts ──────────────────────────────────────────────────────────────────────
@@ -314,25 +390,86 @@ class VenuAIBearerAuthMiddleware:
         self.app = app
         self._api_key = api_key
 
+    async def _reply(self, send, status, body, extra=None):
+        headers = [(b"content-type", b"application/json")] + (extra or [])
+        await send({"type": "http.response.start", "status": status, "headers": headers})
+        await send({"type": "http.response.body", "body": json.dumps(body).encode()})
+
+    def _authenticate(self, token: str):
+        """Static operator key -> operator principal; else a VenuAI JWT -> that user. None if invalid."""
+        if token and hmac.compare_digest(token, self._api_key):
+            return _operator()
+        if token:
+            try:
+                from VENUAI import auth
+                payload = auth.decode_access_token(token)
+                row = auth.get_user_by_id(payload["sub"])
+                if row is not None:
+                    return auth.AuthenticatedUser(id=row["id"], email=row["email"], role=row["role"],
+                                                  tenant_id=row["tenant_id"])
+            except Exception:
+                return None
+        return None
+
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
+        # OAuth 2.0 Protected Resource Metadata (RFC 9728) - public by design.
+        if scope["path"] == "/.well-known/oauth-protected-resource":
+            await self._reply(send, 200, protected_resource_metadata(scope))
+            return
+
         headers = dict(scope.get("headers", []))
         auth_header = headers.get(b"authorization", b"").decode("latin-1")
         token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
-
-        if not token or not hmac.compare_digest(token, self._api_key):
-            response_body = json.dumps({"error": "Unauthorized — missing or invalid bearer token."}).encode()
-            await send({
-                "type": "http.response.start", "status": 401,
-                "headers": [(b"content-type", b"application/json")],
-            })
-            await send({"type": "http.response.body", "body": response_body})
+        principal = self._authenticate(token)
+        if principal is None:
+            meta_url = _resource_url(scope) + "/.well-known/oauth-protected-resource"
+            await self._reply(
+                send, 401, {"error": "Unauthorized - missing or invalid bearer token."},
+                [(b"www-authenticate", f'Bearer resource_metadata="{meta_url}"'.encode())])
             return
 
-        await self.app(scope, receive, send)
+        version = headers.get(b"mcp-protocol-version", b"").decode("latin-1")
+        if version and version not in SUPPORTED_PROTOCOL_VERSIONS:
+            await self._reply(send, 400, {"error": f"Unsupported MCP-Protocol-Version '{version}'.",
+                                          "supported": list(SUPPORTED_PROTOCOL_VERSIONS)})
+            return
+
+        tok = _principal_var.set(principal)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _principal_var.reset(tok)
+
+
+def _operator():
+    from VENUAI.auth import AuthenticatedUser
+    return AuthenticatedUser(id="mcp-operator", email="mcp-operator@local", role="admin",
+                             tenant_id=os.getenv("MCP_TENANT_ID", "default"))
+
+
+def _resource_url(scope) -> str:
+    configured = os.getenv("MCP_PUBLIC_URL", "").rstrip("/")
+    if configured:
+        return configured
+    host = dict(scope.get("headers", [])).get(b"host", b"127.0.0.1").decode("latin-1")
+    return f"http://{host}"
+
+
+def protected_resource_metadata(scope) -> dict:
+    """RFC 9728 document. The bearer is a VenuAI JWT (or the operator key); the authorization
+    server is the VenuAI backend (``MCP_AUTH_SERVER``)."""
+    base = _resource_url(scope)
+    return {
+        "resource": f"{base}/mcp",
+        "authorization_servers": [os.getenv("MCP_AUTH_SERVER", "http://127.0.0.1:8000")],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": ["venuai:read"],
+        "resource_name": "VenuAI DRDO Knowledge Base",
+    }
 
 
 def build_http_app():

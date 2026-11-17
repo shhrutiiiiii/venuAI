@@ -3,7 +3,7 @@
 import { useState, useCallback } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Mail,
   Lock,
@@ -21,6 +21,9 @@ type LoginFormInput = z.input<typeof loginSchema>;
 type LoginFormData = z.output<typeof loginSchema>;
 import { useAuth } from "@/contexts/AuthContext";
 import DemoCredentialsBadge from "./DemoCredentialsBadge";
+
+// Demo credentials are a dev convenience only: hidden unless explicitly enabled.
+const SHOW_DEMO = process.env.NEXT_PUBLIC_SHOW_DEMO === "true";
 
 // ─── Floating Label Input ─────────────────────────────────────────────────────
 
@@ -138,6 +141,9 @@ export default function LoginForm() {
   const { setUser } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+
+  // OAuth failures come back as /login?error=<message>.
+  const urlError = useSearchParams().get("error")?.slice(0, 200) ?? null;
   const [isSuccess, setIsSuccess] = useState(false);
 
   const {
@@ -186,15 +192,15 @@ export default function LoginForm() {
   return (
     <div className="w-full max-w-md mx-auto space-y-4">
       {/* Demo credentials badge */}
-      <DemoCredentialsBadge onUseCredentials={handleDemoCredentials} />
+      {SHOW_DEMO && <DemoCredentialsBadge onUseCredentials={handleDemoCredentials} />}
 
       {/* Form card */}
       <div className="rounded-2xl decent-card glow-card p-6 sm:p-7 space-y-5 fade-in-up">
         {/* Global error */}
-        {authError && (
+        {(authError ?? urlError) && (
           <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 scale-in">
             <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-            <p className="text-xs sm:text-sm font-medium">{authError}</p>
+            <p className="text-xs sm:text-sm font-medium">{authError ?? urlError}</p>
           </div>
         )}
 
@@ -342,9 +348,8 @@ export default function LoginForm() {
             </div>
 
             <div className="grid grid-cols-2 gap-2.5">
-              <button
-                type="button"
-                onClick={() => handleDemoCredentials("demo@chat.com", "demo12345")}
+              <a
+                href="/api/auth/oauth/google/login"
                 className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-semibold border transition-all duration-150 hover:bg-slate-500/5 active:scale-[0.98]"
                 style={{
                   background: "var(--bg-input)",
@@ -371,11 +376,10 @@ export default function LoginForm() {
                   />
                 </svg>
                 <span>Google</span>
-              </button>
+              </a>
 
-              <button
-                type="button"
-                onClick={() => handleDemoCredentials("admin@chat.com", "admin12345")}
+              <a
+                href="/api/auth/oauth/github/login"
                 className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-semibold border transition-all duration-150 hover:bg-slate-500/5 active:scale-[0.98]"
                 style={{
                   background: "var(--bg-input)",
@@ -387,7 +391,7 @@ export default function LoginForm() {
                   <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
                 </svg>
                 <span>GitHub</span>
-              </button>
+              </a>
             </div>
           </div>
         </form>

@@ -28,6 +28,7 @@ Covers only the proxy layer. The actual backend contract is [`../Backend/api.md`
 | Next.js route | Proxies to | Notes |
 |---|---|---|
 | `POST /api/rag/query` | `POST {BACKEND_URL}/query` | Forwards `Authorization: Bearer <token>` read from the access-token cookie (via `serverAuthHeader.ts`) |
+| `POST /api/rag/research` | `POST {BACKEND_URL}/research` | Deep Research. Same auth forwarding; `maxDuration = 180`, upstream timeout 170 s (backend can take ~120 s). Returns 504 on timeout, 503 if backend is down; backend 429 (5/min) is passed through |
 | `POST /api/rag/stream` | `POST {BACKEND_URL}/query/stream` | Same auth forwarding; must preserve SSE streaming, not buffer |
 | `POST /api/rag/upload` | `POST {BACKEND_URL}/upload` | Same auth forwarding; pass-through multipart form data |
 | `GET /api/rag/documents`, `DELETE /api/rag/documents` | `{BACKEND_URL}/documents[/{id}]` | Same auth forwarding |
@@ -88,3 +89,18 @@ Add CSRF tokens if a cross-site state-changing flow is ever introduced (current 
 
 ## Notes for Developers
 Keep this table's rows 1:1 with the files under `src/app/api/auth/` and `src/app/api/rag/`. Any new RAG route must call `authHeader(req)` from `src/lib/serverAuthHeader.ts` — don't add a proxy route that silently skips auth forwarding.
+
+
+## Chat UI answer contract (consumed fields)
+
+`/api/rag/query` and `/api/rag/stream` responses are read defensively; every field below is optional and nothing is defaulted to a fake number.
+
+- `answer`, `sources[{document,page,chunk_preview}]` (legacy; shown as unverified citations)
+- `citations[{index,chunk_id,doc_id,filename,page,quote,verified}]`: rendered as inline `[n]` chips with hover/click preview and a per-answer sources panel
+- `grounding_score` (number or null), `verified` (bool), `verification_reason`/`reason`: null or `verified=false` shows "Unverified" plus the reason. The stream `done` event score is ignored unless `verified === true` (the current backend hardcodes it)
+- `blocked`, `block_reason`; current backend signals a block via `verification_flags` containing `GUARDRAIL_TRIGGERED: <type>`. Both render as a distinct "Blocked by guardrails" card
+- `model_used`: real model id shown on the answer when present
+- `GET /api/models`: shown read-only as "Model routing" (registry order: first enabled = primary, rest = fallbacks). `/query` has no model parameter, so there is no selector
+- `/research` response (`ResearchResponse`): plan/sub-questions, `synthesized_answer`, `evidence_coverage`, `critique_passed`, `plan_is_fallback`, `truncated`. The call is synchronous, so the UI shows elapsed time only (no fake step progress)
+
+Components: `CitationChip`, `AnswerActions` (Copy as Markdown, Download .md, Print/PDF via `@media print` in `globals.css`), `ResearchReport`/`ResearchPending`, `ModelRouting`, `ConfidenceBadge`, `VerificationPanel`; helpers in `src/lib/answerTypes.ts`. Follow-up suggestions are not implemented because the backend provides none.

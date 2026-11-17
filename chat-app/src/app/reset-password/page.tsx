@@ -3,12 +3,17 @@
 import { ArrowLeft, Lock, CheckCircle2 } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 
 function ResetPasswordForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const token = searchParams.get("token") || "";
+  // Keep the token only in memory: strip it from the address bar/history right
+  // away so it is not leaked via history, screenshots or the Referer header.
+  const [token] = useState(() => searchParams.get("token") || "");
+  useEffect(() => {
+    if (window.location.search) window.history.replaceState(null, "", window.location.pathname);
+  }, []);
 
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -19,8 +24,8 @@ function ResetPasswordForm() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters.");
+    if (password.length < 12) {
+      setError("Password must be at least 12 characters.");
       return;
     }
     if (password !== confirm) {
@@ -31,7 +36,7 @@ function ResetPasswordForm() {
     try {
       const res = await fetch("/api/auth/reset-password", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Requested-With": "venuai" },
         body: JSON.stringify({ token, new_password: password }),
       });
       const data = await res.json().catch(() => ({}));
@@ -114,7 +119,17 @@ function ResetPasswordForm() {
 
 export default function ResetPasswordPage() {
   return (
-    <main className="min-h-screen flex items-center justify-center px-5" style={{ background: "#060818" }}>
+    <>
+      {/* Never leak the (single-use) reset link to third parties via Referer. */}
+      <meta name="referrer" content="no-referrer" />
+      <ResetPasswordShell />
+    </>
+  );
+}
+
+function ResetPasswordShell() {
+  return (
+    <main className="min-h-screen flex items-center justify-center px-5" style={{ background: "rgba(6, 8, 24, 0.8)" }}>
       <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden>
         <div
           className="absolute orb-animate"

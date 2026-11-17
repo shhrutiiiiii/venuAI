@@ -25,7 +25,7 @@ import os
 from enum import Enum
 from typing import List
 
-from VENUAI.ai_gateway.model_registry import ModelCapability, ModelEntry, get_models_with_capability
+from VENUAI.ai_gateway.model_registry import ModelCapability, ModelEntry, get_catalog
 
 
 class TaskType(str, Enum):
@@ -44,24 +44,42 @@ _TASK_CAPABILITY = {
 
 _LATENCY_ORDER = {"fast": 0, "standard": 1, "slow": 2, "unknown": 3}
 
+# Per-task reasoning effort for models that support it (gpt-oss family).
+# Classification must be cheap; generation/synthesis/verification get a middle
+# setting. Reasoning tokens count against max_tokens — see provider headroom.
+_TASK_EFFORT = {
+    TaskType.FAST_CLASSIFICATION: "low",
+    TaskType.GENERATION: "medium",
+    TaskType.SYNTHESIS: "medium",
+    TaskType.VERIFICATION: "medium",
+}
+
+
+def reasoning_effort_for(task_type: TaskType) -> str:
+    return _TASK_EFFORT[task_type]
+
 
 def route(task_type: TaskType) -> List[ModelEntry]:
-    """Returns an ordered fallback chain of model ids for this task type."""
+    """Returns an ordered fallback chain of model entries for this task type.
+
+    Order: GROQ_MODEL override (if it names an enabled chat model), then models
+    with the task's capability (fast->slow, catalog order breaks ties so the
+    registry's first entry is the primary), then every other enabled chat model
+    as a last-resort fallback. Safety / prompt-guard classifiers are never in
+    the chain."""
     required_capability = _TASK_CAPABILITY[task_type]
-    candidates = get_models_with_capability(required_capability, enabled_only=True)
-    candidates = sorted(candidates, key=lambda m: _LATENCY_ORDER.get(m.latency_class, 3))
+    enabled_chat = [m for m in get_catalog() if m.enabled and m.is_chat]
+    primary = sorted(
+        [m for m in enabled_chat if required_capability in m.capabilities],
+        key=lambda m: _LATENCY_ORDER.get(m.latency_class, 3),
+    )
+    rest = [m for m in enabled_chat if m not in primary]
+    candidates = primary + rest
 
     override = os.getenv("GROQ_MODEL")
     if override:
         overridden = [m for m in candidates if m.model_id == override]
-        rest = [m for m in candidates if m.model_id != override]
-        candidates = overridden + rest
-
-    if not candidates:
-        # Nothing with the right capability is enabled — fall back to any
-        # enabled model at all rather than returning an empty chain, so a
-        # misconfigured capability tag doesn't take the whole system down.
-        candidates = get_models_with_capability(ModelCapability.FAST, enabled_only=True) or \
-                     get_models_with_capability(ModelCapability.REASONING, enabled_only=True)
+        others = [m for m in candidates if m.model_id != override]
+        candidates = overridden + others
 
     return candidates

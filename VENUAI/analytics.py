@@ -21,7 +21,7 @@ from typing import List, Optional
 
 logger = logging.getLogger("drdo-rag")
 
-_DB_PATH = str(Path("VENUAI/venuai_memory.db").resolve())
+_DB_PATH = str((Path(__file__).resolve().parent / "venuai_memory.db"))
 
 
 class QueryAnalytics:
@@ -111,7 +111,7 @@ class QueryAnalytics:
         except Exception as e:
             logger.error(f"[Analytics] log_query error: {e}")
 
-    def get_dashboard_data(self) -> dict:
+    def get_dashboard_data(self, user_ids: Optional[List[str]] = None, tenant_id: Optional[str] = None) -> dict:
         """
         Return aggregated analytics statistics for the admin dashboard.
 
@@ -124,43 +124,56 @@ class QueryAnalytics:
           - avg_latency_ms
           - error_rate
           - recent_queries (last 20)
+
+        `user_ids` restricts every aggregate to those users (the caller's
+        tenant); `None` means unrestricted (operator tooling only). An empty
+        list yields empty statistics.
         """
         try:
             with sqlite3.connect(self._db_path) as conn:
-                return self._aggregate(conn)
+                return self._aggregate(conn, user_ids, tenant_id)
         except Exception as e:
             logger.error(f"[Analytics] get_dashboard_data error: {e}")
             return {}
 
-    def _aggregate(self, conn: sqlite3.Connection) -> dict:
+    def _aggregate(self, conn: sqlite3.Connection, user_ids: Optional[List[str]] = None,
+                   tenant_id: Optional[str] = None) -> dict:
         now = datetime.now()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         week_start = (now - timedelta(days=7)).isoformat()
         month_start = (now - timedelta(days=30)).isoformat()
 
+        # Tenant scoping: every statement below is filtered by this clause.
+        if user_ids is None:
+            scope, sp = "1=1", ()
+        elif not user_ids:
+            scope, sp = "0=1", ()
+        else:
+            scope, sp = f"user_id IN ({','.join('?' * len(user_ids))})", tuple(user_ids)
+
         def scalar(sql: str, params=()) -> float:
             row = conn.execute(sql, params).fetchone()
             return row[0] if row and row[0] is not None else 0
 
-        total_all = int(scalar("SELECT COUNT(*) FROM analytics"))
-        total_today = int(scalar("SELECT COUNT(*) FROM analytics WHERE timestamp >= ?", (today_start,)))
-        total_week = int(scalar("SELECT COUNT(*) FROM analytics WHERE timestamp >= ?", (week_start,)))
+        total_all = int(scalar(f"SELECT COUNT(*) FROM analytics WHERE {scope}", sp))
+        total_today = int(scalar(f"SELECT COUNT(*) FROM analytics WHERE {scope} AND timestamp >= ?", sp + (today_start,)))
+        total_week = int(scalar(f"SELECT COUNT(*) FROM analytics WHERE {scope} AND timestamp >= ?", sp + (week_start,)))
 
-        avg_latency = scalar("SELECT AVG(latency_ms) FROM analytics WHERE error IS NULL")
-        error_count = scalar("SELECT COUNT(*) FROM analytics WHERE error IS NOT NULL")
+        avg_latency = scalar(f"SELECT AVG(latency_ms) FROM analytics WHERE error IS NULL AND {scope}", sp)
+        error_count = scalar(f"SELECT COUNT(*) FROM analytics WHERE error IS NOT NULL AND {scope}", sp)
         error_rate = round(error_count / total_all * 100, 1) if total_all else 0.0
 
         # Daily grounding/hallucination trends (last 30 days)
         trend_rows = conn.execute(
-            """SELECT DATE(timestamp) as day,
+            f"""SELECT DATE(timestamp) as day,
                       AVG(grounding_score) as avg_grounding,
                       AVG(hallucination_score) as avg_hallucination,
                       COUNT(*) as count
                FROM analytics
-               WHERE timestamp >= ?
+               WHERE {scope} AND timestamp >= ?
                GROUP BY day
                ORDER BY day""",
-            (month_start,),
+            sp + (month_start,),
         ).fetchall()
 
         grounding_trend = [
@@ -172,21 +185,21 @@ class QueryAnalytics:
 
         # Domain breakdown (infer from agent_used + question keywords)
         domain_rows = conn.execute(
-            "SELECT agent_used, COUNT(*) FROM analytics GROUP BY agent_used"
+            f"SELECT agent_used, COUNT(*) FROM analytics WHERE {scope} GROUP BY agent_used", sp
         ).fetchall()
         queries_by_domain = {r[0]: r[1] for r in domain_rows}
 
         # Top topics via keyword extraction
         all_questions = [
-            r[0] for r in conn.execute("SELECT question FROM analytics LIMIT 500").fetchall()
+            r[0] for r in conn.execute(f"SELECT question FROM analytics WHERE {scope} LIMIT 500", sp).fetchall()
         ]
         top_topics = self._extract_top_topics(all_questions)
 
         # Recent queries
         recent = conn.execute(
-            """SELECT question, latency_ms, grounding_score, hallucination_score,
+            f"""SELECT question, latency_ms, grounding_score, hallucination_score,
                       agent_used, timestamp, error
-               FROM analytics ORDER BY timestamp DESC LIMIT 20"""
+               FROM analytics WHERE {scope} ORDER BY timestamp DESC LIMIT 20""", sp
         ).fetchall()
         recent_queries = [
             {
@@ -201,7 +214,10 @@ class QueryAnalytics:
             for r in recent
         ]
 
+        ops = self._ops_block(tenant_id if user_ids is not None else None)
         return {
+            "ops": ops,
+            "online_eval": self._online_eval_block() if user_ids is None else {},
             "total_queries": {
                 "today": total_today,
                 "week": total_week,
@@ -215,6 +231,38 @@ class QueryAnalytics:
             "top_topics": top_topics,
             "recent_queries": recent_queries,
         }
+
+    @staticmethod
+    def _ops_block(tenant_id: Optional[str] = None) -> dict:
+        """Ledger-backed ops metrics (tokens, p50/p95, cache hit, escalation, cost). Never raises."""
+        try:
+            from VENUAI import trace_store
+            m = trace_store.ops_metrics(7, tenant_id)
+            cost, priced = 0.0, False
+            try:
+                from VENUAI.ai_gateway import model_registry as _mr
+                for model, u in m["by_model"].items():
+                    spec = getattr(_mr, "get_model", lambda _m: None)(model)
+                    pin = getattr(spec, "price_in_per_mtok", None)
+                    pout = getattr(spec, "price_out_per_mtok", None)
+                    if pin is not None and pout is not None:
+                        priced = True
+                        cost += u["prompt_tokens"] / 1e6 * pin + u["completion_tokens"] / 1e6 * pout
+            except Exception:
+                pass
+            m["cost_usd"] = round(cost, 4) if priced else None   # null = no pricing in registry
+            return m
+        except Exception as e:
+            logger.debug("ops block failed: %s", e)
+            return {}
+
+    @staticmethod
+    def _online_eval_block() -> dict:
+        try:
+            from VENUAI import online_evals
+            return online_evals.status()
+        except Exception:
+            return {}
 
     @staticmethod
     def _extract_top_topics(questions: List[str]) -> List[dict]:

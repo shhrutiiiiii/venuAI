@@ -127,7 +127,7 @@ export default function AnalyticsPage() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-300">
+      <div className="min-h-screen bg-slate-950/80 flex items-center justify-center text-slate-300">
         <RefreshCw className="w-6 h-6 animate-spin text-purple-500" />
       </div>
     );
@@ -136,7 +136,7 @@ export default function AnalyticsPage() {
   // Role Guard Check
   if (!user || user.role !== "admin") {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-slate-950/80 flex items-center justify-center p-4">
         <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-6 text-center shadow-2xl">
           <div className="w-12 h-12 bg-rose-500/10 rounded-full flex items-center justify-center mx-auto mb-4 border border-rose-500/20">
             <Lock className="w-6 h-6 text-rose-400" />
@@ -167,7 +167,7 @@ export default function AnalyticsPage() {
   );
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-6 md:p-10">
+    <div className="min-h-screen bg-slate-950/80 text-slate-100 p-6 md:p-10">
       <div className="max-w-7xl mx-auto space-y-8">
         {/* Header Bar */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-6">

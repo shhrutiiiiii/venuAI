@@ -31,9 +31,14 @@ Available tools (each factory-built tool closes over `allowed_doc_ids` and
                         admin-only — see VENUAI/code_sandbox.py)
 """
 
+import concurrent.futures
+import contextvars
 import logging
 import math
+import os
 import re
+import threading
+import types
 from typing import List, Optional
 
 from langchain_core.tools import tool
@@ -55,7 +60,8 @@ def _calculate(expression: str) -> str:
     except ZeroDivisionError:
         return "Error: Division by zero."
     except Exception as e:
-        return f"Calculation error: {str(e)}. Expression: '{expression}'"
+        logger.error("tool failed: %s", type(e).__name__, exc_info=e)
+        return f"Calculation error: ({type(e).__name__}; details in server log). Expression: '{expression}'"
 
 
 def _search_web_drdo(query: str) -> str:
@@ -93,7 +99,7 @@ def _search_web_drdo(query: str) -> str:
         )
     except Exception as e:
         logger.error(f"[web_search_drdo] Error: {e}")
-        return f"Web search failed: {str(e)}"
+        return f"Web search failed: ({type(e).__name__}; details in server log)"
 
 
 def _run_code(code: str) -> str:
@@ -114,7 +120,7 @@ def _run_code(code: str) -> str:
         return f"Code execution sandbox unavailable: {e}"
     except Exception as e:
         logger.error(f"[code_execution] Error: {e}")
-        return f"Code execution failed: {str(e)}"
+        return f"Code execution failed: ({type(e).__name__}; details in server log)"
 
 
 def _search_kb(
@@ -135,26 +141,13 @@ def _search_kb(
         from VENUAI.rag_server import get_vector_store
         from VENUAI.context_engineer import rank_chunks
 
-        search_kwargs = {"k": top_k}
-        if allowed_doc_ids is not None:
-            search_kwargs["filter"] = {"doc_id": {"$in": allowed_doc_ids or ["__none__"]}}
-
-        vs = get_vector_store()
-        retriever = vs.as_retriever(search_type="similarity", search_kwargs=search_kwargs)
-        docs = retriever.invoke(query)
-
-        # Phase 5: fold in table/image region hits, same as the standard
-        # RAG and Agentic RAG paths (VENUAI.rag_server.retrieve_node,
-        # VENUAI.agentic_rag._retrieve) — this was the one retrieval mode
-        # still missing it. Best-effort: a lexical-search failure here
-        # must not break the text-chunk result.
-        try:
-            from VENUAI.multimodal_retrieval import retrieve_multimodal_documents
-            region_docs = retrieve_multimodal_documents(query, allowed_doc_ids, top_k=3)
-            if region_docs:
-                docs = list(docs) + region_docs
-        except Exception as region_err:
-            logger.warning(f"[drdo_kb_search] multimodal region retrieval skipped: {region_err}")
+        # Shared pipeline (VENUAI.retrieval): dense + cached BM25 -> RRF ->
+        # cross-encoder rerank -> relevance floor, multimodal regions included.
+        # The agent already writes its own query, so no history rewrite here.
+        from VENUAI.retrieval import retrieve_documents
+        docs = retrieve_documents(
+            get_vector_store(), query, top_k, allowed_doc_ids, rewrite=False,
+        ).documents
 
         ranked = rank_chunks(docs, query)
 
@@ -173,14 +166,14 @@ def _search_kb(
         return "\n\n---\n\n".join(parts)
     except Exception as e:
         logger.error(f"[drdo_kb_search] Error: {e}")
-        return f"Knowledge base search failed: {str(e)}"
+        return f"Knowledge base search failed: ({type(e).__name__}; details in server log)"
 
 
-def _recall_memory(query: str, user_id: str) -> str:
+def _recall_memory(query: str, user_id: str, tenant_id: str = "default") -> str:
     try:
         from VENUAI.memory_manager import get_memory_manager
         mm = get_memory_manager()
-        ctx = mm.get_context(session_id="recall-temp", user_id=user_id, query=query)
+        ctx = mm.get_context(session_id="recall-temp", user_id=user_id, query=query, tenant_id=tenant_id)
         parts = []
         if ctx.get("episodic"):
             parts.append(f"**Past sessions:** {ctx['episodic']}")
@@ -189,7 +182,7 @@ def _recall_memory(query: str, user_id: str) -> str:
         return "\n\n".join(parts) if parts else "No relevant past memories found."
     except Exception as e:
         logger.error(f"[memory_recall] Error: {e}")
-        return f"Memory recall failed: {str(e)}"
+        return f"Memory recall failed: ({type(e).__name__}; details in server log)"
 
 
 def _summarize_document(doc_id: str, allowed_doc_ids: Optional[List[str]]) -> str:
@@ -199,11 +192,9 @@ def _summarize_document(doc_id: str, allowed_doc_ids: Optional[List[str]]) -> st
         if not meta:
             return "No documents found in the knowledge base."
 
-        if doc_id not in meta:
-            return f"Document '{doc_id}' not found. Use list_knowledge_base to see available IDs."
-
-        if allowed_doc_ids is not None and doc_id not in allowed_doc_ids:
-            return "You are not authorized to view this document."
+        # One message for "missing" and "not yours": no existence oracle.
+        if doc_id not in meta or (allowed_doc_ids is not None and doc_id not in allowed_doc_ids):
+            return "Document not found. Use list_knowledge_base to see available IDs."
 
         doc = meta[doc_id]
         tags = doc.get("tags", {})
@@ -218,7 +209,7 @@ def _summarize_document(doc_id: str, allowed_doc_ids: Optional[List[str]]) -> st
         )
     except Exception as e:
         logger.error(f"[document_summary] Error: {e}")
-        return f"Document summary failed: {str(e)}"
+        return f"Document summary failed: ({type(e).__name__}; details in server log)"
 
 
 def _list_kb(allowed_doc_ids: Optional[List[str]]) -> str:
@@ -246,7 +237,17 @@ def _list_kb(allowed_doc_ids: Optional[List[str]]) -> str:
         return "\n".join(lines)
     except Exception as e:
         logger.error(f"[list_knowledge_base] Error: {e}")
-        return f"Failed to list knowledge base: {str(e)}"
+        return f"Failed to list knowledge base: ({type(e).__name__}; details in server log)"
+
+
+_UNSCOPED_DENIED = (
+    "Tool denied: this unscoped tool has no caller identity (it would read across tenants/users). "
+    "Use build_agent_tools() or set ALLOW_UNSCOPED_TOOLS=1 for single-tenant operator use."
+)
+
+
+def _unscoped_allowed() -> bool:
+    return os.getenv("ALLOW_UNSCOPED_TOOLS", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 # ── Module-level, unfiltered tools ─────────────────────────────────────────────
@@ -266,6 +267,8 @@ def drdo_kb_search(query: str, top_k: int = 5) -> str:
         query : The search query string.
         top_k : Number of results to return (default 5).
     """
+    if not _unscoped_allowed():
+        return _UNSCOPED_DENIED
     return _search_kb(query, top_k, allowed_doc_ids=None)
 
 
@@ -297,6 +300,8 @@ def memory_recall(query: str, user_id: str) -> str:
         query   : The search query to find relevant memories.
         user_id : The user's ID (from AuthUser).
     """
+    if not _unscoped_allowed():
+        return _UNSCOPED_DENIED
     return _recall_memory(query, user_id)
 
 
@@ -310,6 +315,8 @@ def document_summary(doc_id: str) -> str:
     Args:
         doc_id: The document UUID (from the /documents list endpoint).
     """
+    if not _unscoped_allowed():
+        return _UNSCOPED_DENIED
     return _summarize_document(doc_id, allowed_doc_ids=None)
 
 
@@ -333,6 +340,8 @@ def list_knowledge_base() -> str:
     knowledge base, with their filename, page count, upload date,
     and domain tags.
     """
+    if not _unscoped_allowed():
+        return _UNSCOPED_DENIED
     return _list_kb(allowed_doc_ids=None)
 
 
@@ -346,43 +355,176 @@ ALL_TOOLS = [
 ]
 
 
+# ── Tool platform: guarded execution (Wave B / B3) ─────────────────────────────
+
+_TOOL_POOL = None
+_TOOL_POOL_LOCK = threading.Lock()
+
+
+def _pool():
+    global _TOOL_POOL
+    with _TOOL_POOL_LOCK:
+        if _TOOL_POOL is None:
+            _TOOL_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="tool")
+        return _TOOL_POOL
+
+
+def _run_with_timeout(fn, timeout_s: float):
+    """Run fn in a pool thread (context copied so tracing/contextvars carry over)."""
+    ctx = contextvars.copy_context()
+    fut = _pool().submit(ctx.run, fn)
+    try:
+        return fut.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError:
+        fut.cancel()
+        raise TimeoutError(f"tool timed out after {timeout_s:.0f}s")
+
+
+def tool_call_budget() -> int:
+    """Max tool calls one request may make (env TOOL_CALL_BUDGET, default 12)."""
+    try:
+        return max(1, int(os.getenv("TOOL_CALL_BUDGET", "12")))
+    except ValueError:
+        return 12
+
+
+def guarded_call(tool_id: str, args: dict, fn, *, user_id: str, tenant_id: str = "default",
+                 user_role: str = "user", agent_id: str = "react_agent", kind: str = "builtin",
+                 description: str = "", schema: Optional[dict] = None) -> str:
+    """Every tool call passes: catalog/role policy -> arg-schema validation ->
+    circuit breaker -> human approval -> timeout+retry execution -> size cap,
+    and is written to the always-on tool ledger with a hash of the args.
+
+    Denials/validation errors are returned as strings (the ReAct loop feeds
+    them back to the model, which can then correct the call)."""
+    import time as _time
+    from VENUAI import approvals, tracing, policy_engine, tool_registry
+
+    ident = types.SimpleNamespace(id=user_id, tenant_id=tenant_id, role=user_role)
+
+    def ledger(status, decision="allowed", approver=None, latency=None, error=None):
+        tracing.record_tool_call(tool_id, args, status=status, decision=decision, approver=approver,
+                                 latency_ms=latency, error=error, user_id=user_id, tenant_id=tenant_id)
+
+    decision = policy_engine.check_tool_call(user_role=user_role, agent_id=agent_id, tool_id=tool_id,
+                                             user_id=user_id, tenant_id=tenant_id)
+    if not decision.allowed:
+        ledger("denied", "policy_denied", error=decision.reason)
+        return f"Tool denied: {decision.reason}"
+
+    desc = tool_registry.get(tool_id)
+    schema = schema if schema is not None else (desc.arg_schema if desc else None)
+    err = policy_engine.validate_args(schema, args)
+    if err:
+        ledger("invalid_args", error=err)
+        return f"Tool error: {err}. Fix the arguments and call the tool again."
+
+    if not policy_engine.tool_breaker.allow(tool_id):
+        ledger("circuit_open", error="circuit open")
+        return f"Tool '{tool_id}' is temporarily unavailable after repeated failures; try again later."
+
+    appr = approvals.require_approval(
+        tool_id, args, ident, description=description or (desc.description if desc else ""),
+        schema=schema, kind=kind)
+    if appr.status == "pending":
+        ledger("pending_approval", "pending")
+        return (f"APPROVAL_REQUIRED: tool '{tool_id}' needs human approval (approval_id={appr.approval_id}). "
+                "Tell the user the action is awaiting their approval; do not retry.")
+    if appr.status == "denied":
+        ledger("denied", "approval_denied", approver=appr.approver)
+        return "Tool denied: a human approver rejected this call."
+
+    timeout_s = float(desc.timeout_seconds) if desc else 30.0
+    retries = desc.max_retries if desc else 0
+    cap = desc.max_result_chars if desc else 20000
+    decision_label = "allowed" if appr.approval_id is None else "approved"
+    t0 = _time.perf_counter()
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            with tracing.span(f"tool.{tool_id}", attempt=attempt):
+                if os.getenv("TOOL_ENFORCE_TIMEOUT", "on").lower() == "off":
+                    out = fn()
+                else:
+                    out = _run_with_timeout(fn, timeout_s)
+            policy_engine.tool_breaker.success(tool_id)
+            text = out if isinstance(out, str) else str(out)
+            if len(text) > cap:
+                text = text[:cap] + f"\n...[truncated {len(text) - cap} chars]"
+            ledger("ok", decision_label, appr.approver, (_time.perf_counter() - t0) * 1000)
+            return text
+        except TimeoutError:
+            last_err = "the tool timed out"
+            break                                   # a hung tool is not retried
+        except Exception as e:
+            logger.error("[tool %s] attempt %d failed: %s", tool_id, attempt, type(e).__name__, exc_info=e)
+            last_err = type(e).__name__
+            _time.sleep(0.2 * (attempt + 1))
+    policy_engine.tool_breaker.failure(tool_id)
+    ledger("error", error=last_err, latency=(_time.perf_counter() - t0) * 1000)
+    return f"Tool '{tool_id}' failed: {last_err}"
+
+
+try:  # stateless executor used by approvals.resume once a human approves
+    from VENUAI import approvals as _approvals
+    _approvals.register_executor("code_execution", lambda a: _run_code(a["code"]))
+except Exception:  # pragma: no cover
+    pass
+
+
 # ── Per-request, identity-bound tools ──────────────────────────────────────────
 
 def build_agent_tools(
     user_id: str, allowed_doc_ids: Optional[List[str]], user_role: str = "user",
-    collected_docs: Optional[list] = None,
+    collected_docs: Optional[list] = None, tenant_id: Optional[str] = None,
 ):
     """
     Build a fresh set of tools bound to one request's caller identity.
 
     `user_id` is bound by closure, not exposed as an LLM-controllable
-    parameter — this closes a real gap in the module-level `memory_recall`
-    tool, where the LLM supplied (and could therefore spoof) `user_id`
-    itself. `allowed_doc_ids` (from VENUAI.rag_server.get_visible_doc_ids)
+    parameter. `allowed_doc_ids` (from VENUAI.rag_server.get_visible_doc_ids)
     restricts `drdo_kb_search`, `document_summary`, and `list_knowledge_base`
-    to documents the caller is authorized to see — the same rule enforced
-    for standard RAG, streaming, and multi-agent mode. See
-    Documents/Backend/authentication.md.
+    to documents the caller is authorized to see.
 
-    Every tool call also passes through VENUAI.policy_engine.check_tool_call
-    first — deny-by-default, independent of (and in addition to) the
-    document-level filtering above. See Documents/AI/tool-policy.md.
+    Every call goes through `guarded_call`: deny-by-default policy, JSON-schema
+    argument validation, circuit breaker, human approval (when TOOL_APPROVAL
+    applies), timeout/retry, result-size cap and the tool-call ledger. See
+    Documents/AI/tool-policy.md and Documents/AI/agent-protocols.md.
 
-    Use this for every real ReAct-agent (`agent_mode=true`) invocation —
-    see VENUAI/rag_server.py's /query handler.
+    `tenant_id` scopes approvals/ledger rows; when omitted it is looked up
+    from the user record (falling back to "default").
 
     `collected_docs`, when passed, accumulates every real `Document`
     `drdo_kb_search` retrieves across all tool calls in this request —
-    see `_search_kb`'s docstring for why (Phase 5 Evidence Explorer
-    integration for ReAct mode).
+    see `_search_kb`'s docstring (Evidence Explorer integration for ReAct).
     """
-    from VENUAI.policy_engine import check_tool_call
+    if tenant_id is None:
+        tenant_id = "default"
+        try:
+            from VENUAI import auth
+            row = auth.get_user_by_id(user_id)
+            if row is not None:
+                tenant_id = row["tenant_id"]
+        except Exception:
+            pass
 
-    def _enforce(tool_id: str):
-        decision = check_tool_call(user_role=user_role, agent_id="react_agent", tool_id=tool_id)
-        if not decision.allowed:
-            return decision.reason
-        return None
+    budget = {"left": tool_call_budget()}
+
+    def _call(tool_id: str, args: dict, fn) -> str:
+        # Per-request tool-call budget: blunts prompt-injection loops that
+        # keep the agent calling tools. Denials are audited and ledgered.
+        if budget["left"] <= 0:
+            msg = "tool-call budget for this request exhausted"
+            try:
+                from VENUAI import tracing, authz
+                tracing.record_tool_call(tool_id, args, status="denied", decision="budget_exceeded",
+                                         user_id=user_id, tenant_id=tenant_id, error=msg)
+                authz.audit("tool.denied", user_id=user_id, tenant_id=tenant_id, detail=f"{tool_id}: {msg}")
+            except Exception:
+                pass
+            return f"Tool denied: {msg}. Answer with the information already gathered."
+        budget["left"] -= 1
+        return guarded_call(tool_id, args, fn, user_id=user_id, tenant_id=tenant_id, user_role=user_role)
 
     @tool
     def drdo_kb_search(query: str, top_k: int = 5) -> str:
@@ -397,10 +539,9 @@ def build_agent_tools(
             query : The search query string.
             top_k : Number of results to return (default 5).
         """
-        denial = _enforce("drdo_kb_search")
-        if denial:
-            return f"Tool denied: {denial}"
-        return _search_kb(query, top_k, allowed_doc_ids=allowed_doc_ids, collected_docs=collected_docs)
+        return _call("drdo_kb_search", {"query": query, "top_k": top_k},
+                     lambda: _search_kb(query, top_k, allowed_doc_ids=allowed_doc_ids,
+                                        collected_docs=collected_docs))
 
     @tool
     def drdo_calculator(expression: str) -> str:
@@ -416,10 +557,7 @@ def build_agent_tools(
         Args:
             expression: A mathematical expression string (Python math syntax).
         """
-        denial = _enforce("drdo_calculator")
-        if denial:
-            return f"Tool denied: {denial}"
-        return _calculate(expression)
+        return _call("drdo_calculator", {"expression": expression}, lambda: _calculate(expression))
 
     @tool
     def memory_recall(query: str) -> str:
@@ -433,10 +571,7 @@ def build_agent_tools(
         Args:
             query : The search query to find relevant memories.
         """
-        denial = _enforce("memory_recall")
-        if denial:
-            return f"Tool denied: {denial}"
-        return _recall_memory(query, user_id)
+        return _call("memory_recall", {"query": query}, lambda: _recall_memory(query, user_id, tenant_id))
 
     @tool
     def document_summary(doc_id: str) -> str:
@@ -449,10 +584,8 @@ def build_agent_tools(
         Args:
             doc_id: The document UUID (from the /documents list endpoint).
         """
-        denial = _enforce("document_summary")
-        if denial:
-            return f"Tool denied: {denial}"
-        return _summarize_document(doc_id, allowed_doc_ids=allowed_doc_ids)
+        return _call("document_summary", {"doc_id": doc_id},
+                     lambda: _summarize_document(doc_id, allowed_doc_ids=allowed_doc_ids))
 
     @tool
     def web_search_drdo(query: str) -> str:
@@ -464,10 +597,7 @@ def build_agent_tools(
         Args:
             query: The search query (appends 'DRDO' automatically).
         """
-        denial = _enforce("web_search_drdo")
-        if denial:
-            return f"Tool denied: {denial}"
-        return _search_web_drdo(query)
+        return _call("web_search_drdo", {"query": query}, lambda: _search_web_drdo(query))
 
     @tool
     def list_knowledge_base() -> str:
@@ -476,10 +606,7 @@ def build_agent_tools(
         the DRDO knowledge base, with their filename, page count, upload
         date, and domain tags.
         """
-        denial = _enforce("list_knowledge_base")
-        if denial:
-            return f"Tool denied: {denial}"
-        return _list_kb(allowed_doc_ids=allowed_doc_ids)
+        return _call("list_knowledge_base", {}, lambda: _list_kb(allowed_doc_ids=allowed_doc_ids))
 
     @tool
     def code_execution(code: str) -> str:
@@ -489,15 +616,12 @@ def build_agent_tools(
         complex for drdo_calculator's expression evaluator (loops, data
         structures, multi-step arithmetic) — never for anything requiring
         network/file access, which this sandbox deliberately blocks.
-        Admin-only.
+        Admin-only; needs human approval when TOOL_APPROVAL=on.
 
         Args:
             code: Python 3 source to execute.
         """
-        denial = _enforce("code_execution")
-        if denial:
-            return f"Tool denied: {denial}"
-        return _run_code(code)
+        return _call("code_execution", {"code": code}, lambda: _run_code(code))
 
     return [
         drdo_kb_search,

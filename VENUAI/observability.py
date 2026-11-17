@@ -14,15 +14,68 @@ Never logs secrets or raw document/answer content — only shape and outcome,
 consistent with VENUAI/ai_gateway/telemetry.py's existing rule.
 """
 
+import contextvars
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger("drdo-rag")
+
+# Set per request by http_security.SecurityMiddleware so every log line can be
+# correlated with the X-Request-ID the client saw.
+request_id_var: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar("request_id", default=None)
+
+
+# ── Log redaction (security stream S4) ────────────────────────────────────────
+# Applied to the *final formatted* line (message + traceback + extras), so it
+# also covers secrets that only appear in an exception text.
+_REDACTIONS = [
+    (re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=\-]{8,}"), r"\1 [REDACTED]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]*"), "[REDACTED_JWT]"),
+    (re.compile(r"\b(?:gsk|sk|pk|rk|xox[bap]|ghp|gho|AIza)[_\-]?[A-Za-z0-9_\-]{16,}"), "[REDACTED_KEY]"),
+    # key=value / "key": "value" for sensitive key names
+    (re.compile(
+        r"(?i)([\"']?(?:password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|"
+        r"id[_-]?token|token|authorization|cookie|set-cookie|client[_-]?secret|private[_-]?key)[\"']?\s*[:=]\s*)"
+        r"(\"[^\"]*\"|'[^']*'|[^\s,;&}\]]+)"), r"\1[REDACTED]"),
+    # query-string secrets
+    (re.compile(r"(?i)([?&](?:token|code|key|api_key|access_token|password)=)[^&\s]+"), r"\1[REDACTED]"),
+]
+_EMAIL_RE = re.compile(r"\b([A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]*@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b")
+
+
+def redact(text: str) -> str:
+    """Mask tokens, API keys, passwords and (partially) e-mail addresses in a log line."""
+    if not text:
+        return text
+    for rx, repl in _REDACTIONS:
+        text = rx.sub(repl, text)
+    return _EMAIL_RE.sub(lambda m: f"{m.group(1)}***@{m.group(2)}", text)
+
+
+class RedactionFilter(logging.Filter):
+    """Logger/handler filter that redacts the rendered message (used on loggers
+    with their own handlers, e.g. uvicorn.access, where our formatters don't run)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            rendered = record.getMessage()
+        except Exception:  # noqa: BLE001 - never let logging raise
+            return True
+        clean = redact(rendered)
+        if clean != rendered:
+            record.msg, record.args = clean, None
+        return True
+
+
+class _RedactingTextFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return redact(super().format(record))
 
 
 class JSONLogFormatter(logging.Formatter):
@@ -67,7 +120,10 @@ class JSONLogFormatter(logging.Formatter):
                     payload[key] = str(value)
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, ensure_ascii=False)
+        rid = request_id_var.get()
+        if rid and "request_id" not in payload:
+            payload["request_id"] = rid
+        return redact(json.dumps(payload, ensure_ascii=False))
 
 
 def configure_logging() -> None:
@@ -83,12 +139,25 @@ def configure_logging() -> None:
     if log_format == "json":
         handler.setFormatter(JSONLogFormatter())
     else:
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        handler.setFormatter(_RedactingTextFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
     root_logger.addHandler(handler)
     root_logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+    # uvicorn installs its own handlers (access log lines contain URLs).
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        lg = logging.getLogger(name)
+        if not any(isinstance(f, RedactionFilter) for f in lg.filters):
+            lg.addFilter(RedactionFilter())
+
+
+def configure_error_reporting() -> bool:
+    """Optional Sentry init - inert (no import) unless SENTRY_DSN is set. See VENUAI/otel_genai.py."""
+    if not os.getenv("SENTRY_DSN", "").strip():
+        return False
+    from VENUAI import otel_genai
+    return otel_genai.init_sentry()
 
 
 def new_request_id() -> str:

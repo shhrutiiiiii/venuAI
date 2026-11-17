@@ -104,7 +104,7 @@ def test_other_user_cannot_view_private_multimodal_document(client, auth_headers
     token2 = login2.json()["access_token"]
 
     r = client.get(f"/documents/{doc_id}/regions", headers={"Authorization": f"Bearer {token2}"})
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 def test_ask_about_table_region_returns_real_answer(client, auth_headers, monkeypatch):
@@ -120,7 +120,7 @@ def test_ask_about_table_region_returns_real_answer(client, auth_headers, monkey
     class _FakeGroqClient:
         def __init__(self):
             class _Completions:
-                def create(inner_self, model, messages, max_tokens, temperature):
+                def create(inner_self, model, messages, max_tokens, temperature, **_kw):
                     return _FakeResponse("The range value is 5000 km.")
 
             class _Chat:
@@ -128,7 +128,7 @@ def test_ask_about_table_region_returns_real_answer(client, auth_headers, monkey
 
             self.chat = _Chat()
 
-    monkeypatch.setattr("groq.Groq", lambda api_key: _FakeGroqClient())
+    monkeypatch.setattr("groq.Groq", lambda api_key=None, **_kw: _FakeGroqClient())
 
     pdf_bytes = _build_sample_pdf_bytes()
     upload = client.post(

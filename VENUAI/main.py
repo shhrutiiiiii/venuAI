@@ -48,7 +48,7 @@ def get_ai_response(user_input, history):
 
     messages.append({"role": "user", "content": user_input})
 
-    model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+    model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     response = client.chat.completions.create(
         model=model,
         messages=messages
@@ -57,7 +57,8 @@ def get_ai_response(user_input, history):
     return response.choices[0].message.content
 # 1. Setup
 load_dotenv()
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# Standalone voice script: keep timeout/retry policy aligned with ai_gateway.provider.get_groq_client
+client = Groq(api_key=os.getenv("GROQ_API_KEY"), timeout=float(os.getenv("GROQ_TIMEOUT_SECONDS", "30")), max_retries=1)
 
 engine = pyttsx3.init()
 
@@ -117,7 +118,7 @@ if __name__ == '__main__':
         # Process message
         history.append({"role": "user", "content": user_input})
 
-        model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+        model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
         response = client.chat.completions.create(
             model=model,
             messages=history

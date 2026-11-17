@@ -1,0 +1,9 @@
+# pip-audit exceptions. Format: <ID>  # owner=... | expires=YYYY-MM-DD | reason
+# Every entry needs an owner and an expiry; scripts/security/audit_python.sh fails on expired entries.
+# All four concern the ChromaDB *server* (HTTP/RBAC/remote-model loading). VenuAI only uses the
+# embedded chromadb.PersistentClient (no server process, no network listener, no trust_remote_code
+# from request input), so the vulnerable code paths are not reachable. No fixed release exists yet.
+PYSEC-2026-311   # owner=platform | expires=2027-02-28 | chroma server pre-auth RCE (server mode only)
+PYSEC-2026-3814  # owner=platform | expires=2027-02-28 | chroma server authed RCE (server mode only)
+PYSEC-2026-3815  # owner=platform | expires=2027-02-28 | chroma SimpleRBAC tenant check (server mode only)
+PYSEC-2026-3813  # owner=platform | expires=2027-02-28 | chroma server cross-tenant authz (server mode only)

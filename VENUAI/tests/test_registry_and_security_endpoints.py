@@ -40,7 +40,7 @@ def test_list_models_returns_real_catalog(client, auth_headers):
     assert r.status_code == 200
     models = r.json()
     model_ids = {m["model_id"] for m in models}
-    assert "llama-3.3-70b-versatile" in model_ids
+    assert "openai/gpt-oss-120b" in model_ids
 
 
 def test_security_violations_requires_admin(client, auth_headers):

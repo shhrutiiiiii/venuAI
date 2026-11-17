@@ -17,9 +17,29 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 os.environ.setdefault("GROQ_API_KEY", "test-key-not-real")
-os.environ.setdefault("GROQ_MODEL", "llama-3.3-70b-versatile")
+# Retrieval quality features that need a model or an LLM are off by default in
+# unit tests; tests of those features enable them explicitly (monkeypatch).
+os.environ["RERANKER_ENABLED"] = "false"
+os.environ["QUERY_REWRITE_ENABLED"] = "false"
+os.environ["CONTEXTUAL_CHUNKING"] = "false"
+os.environ.setdefault("GROQ_MODEL", "openai/gpt-oss-120b")
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-7f3a9c2e1b8d4f6a-not-for-prod")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
+# Fast bcrypt for the suite only (production enforces >= 12).
+os.environ.setdefault("BCRYPT_ROUNDS", "4")
+# Model-based safety classifiers make network calls; tests opt in explicitly with mocks.
+os.environ.setdefault("PROMPT_GUARD_ENABLED", "false")
+os.environ.setdefault("SAFEGUARD_ENABLED", "false")
+# Code execution is off by default in production (policy_engine.code_execution_enabled);
+# the policy/sandbox tests exercise the admin path, test_sec_idor.py covers the default-off gate.
+os.environ.setdefault("ENABLE_CODE_EXECUTION", "1")
+# Never read/write the developer's real answer cache during tests (stale entries mask the pipeline).
+import tempfile as _tf
+os.environ.setdefault("SEMANTIC_CACHE_DB", os.path.join(_tf.mkdtemp(prefix="venuai-test-cache-"), "semantic_cache.db"))
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "security: security regression tests (authz / IDOR / tenancy)")
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +76,14 @@ def _reset_rate_limiter():
     limiter.reset()
     yield
     limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_security_audit_db(monkeypatch, tmp_path):
+    """security_audit.log() writes an append-only DB; never touch the real one."""
+    from VENUAI import security_audit
+    monkeypatch.setattr(security_audit, "DB_PATH", tmp_path / "security_audit_test.db")
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -124,6 +152,10 @@ def isolated_auth_db(monkeypatch, tmp_path):
     monkeypatch.setattr(auth, "DB_PATH", db_path)
     auth.init_db()
     auth.seed_demo_users()
+    # seed_demo_users() never creates an admin (by design); tests that need
+    # one get a fixed throwaway admin in this isolated DB only.
+    if auth.get_user_by_email("admin@chat.com") is None:
+        auth.create_user("admin@chat.com", "admin12345", role="admin")
     yield auth
 
 
