@@ -43,6 +43,8 @@ import {
   Radar,
   Crosshair,
   BarChart3,
+  Menu,
+  ArrowDown,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -328,6 +330,8 @@ export default function ChatPage() {
   const [approval, setApproval] = useState<{ msgId: string; data: PendingApproval; busy: boolean; error: string | null } | null>(null);
   const ragFileInputRef = useRef<HTMLInputElement>(null);
   const ragMessagesEndRef = useRef<HTMLDivElement>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showJump, setShowJump] = useState(false);
 
   const [mounted, setMounted] = useState(false);
 
@@ -408,6 +412,19 @@ export default function ChatPage() {
   useEffect(() => {
     ragMessagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [ragMessages, ragLoading]);
+
+  // Close the mobile drawer whenever the workspace mode changes.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSidebarOpen(false);
+  }, [workspaceMode]);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setSidebarOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sidebarOpen]);
 
   const handleLogout = () => {
     logout();
@@ -848,16 +865,23 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
 
   if (!mounted || isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center transition-colors duration-300">
-        <div className="flex flex-col items-center gap-4">
-          <div
-            className="w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg"
-            style={{ background: "var(--primary-gradient)" }}
-          >
-            <Bot className="w-6 h-6 text-white spin-smooth" />
-          </div>
-          <p className="text-sm font-medium" style={{ color: "var(--text-muted)" }}>Connecting to VenuAI Agent…</p>
+      <div className="flex h-screen overflow-hidden" role="status" aria-label="Loading VenuAI">
+        <div className="hidden md:flex w-64 flex-col gap-3 p-4 border-r shrink-0" style={{ borderColor: "var(--border-subtle)", background: "var(--bg-panel)" }}>
+          <div className="m-skeleton h-9 w-40" />
+          <div className="m-skeleton h-9 w-full" />
+          <div className="m-skeleton h-4 w-24 mt-4" />
+          <div className="m-skeleton h-12 w-full" />
+          <div className="m-skeleton h-12 w-full" />
         </div>
+        <div className="flex-1 flex flex-col">
+          <div className="h-14 border-b" style={{ borderColor: "var(--border-subtle)", background: "var(--bg-panel)" }} />
+          <div className="flex-1 max-w-3xl w-full mx-auto p-6 space-y-4">
+            <div className="m-skeleton h-6 w-1/2" />
+            <div className="m-skeleton h-4 w-full" />
+            <div className="m-skeleton h-4 w-5/6" />
+          </div>
+        </div>
+        <span className="sr-only">Connecting to VenuAI</span>
       </div>
     );
   }
@@ -867,27 +891,37 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
 
   return (
     <div
-      className="flex h-screen overflow-hidden transition-colors duration-300"
+      className="flex h-dvh overflow-hidden"
       style={{ color: "var(--text-main)" }}
     >
+      {sidebarOpen && (
+        <button
+          type="button"
+          aria-label="Close menu"
+          className="m-scrim fixed inset-0 z-30 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
       {/* ── Left Sidebar (ChatGPT / Gemini / Team / DRDO RAG) ── */}
       <aside
-        className="w-64 flex flex-col border-r shrink-0 transition-colors duration-300"
-        style={{ borderColor: "var(--border-subtle)", background: "var(--bg-panel)" }}
+        className={`fixed inset-y-0 left-0 z-40 w-[17rem] max-w-[85vw] md:static md:z-auto md:w-64 md:max-w-none flex flex-col border-r shrink-0 transition-transform md:translate-x-0 ${
+          sidebarOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+        style={{ borderColor: "var(--border-subtle)", background: "var(--bg-panel)", transitionDuration: "var(--m-slow)", transitionTimingFunction: "var(--m-ease)" }}
       >
         {/* Workspace & Mode Switcher Header */}
         <div className="p-3.5 border-b space-y-3" style={{ borderColor: "var(--border-subtle)" }}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden bg-slate-950 border border-cyan-500/40 shadow-sm shrink-0">
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden bg-slate-950 border shrink-0" style={{ borderColor: "var(--border-subtle)" }}>
                 <img src="/drdo-logo.png" alt="DRDO Official Logo" className="w-8 h-8 object-contain" />
               </div>
               <div>
-                <span className="text-sm font-black tracking-tight text-cyan-400 block uppercase">DRDO VenuAI</span>
-                <span className="block text-[9px] font-bold tracking-wider text-slate-400 uppercase">Defence R&D Engine</span>
+                <span className="text-sm font-bold tracking-tight block" style={{ color: "var(--text-main)" }}>VenuAI</span>
+                <span className="block text-[11px]" style={{ color: "var(--text-subtle)" }}>DRDO knowledge engine</span>
               </div>
             </div>
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" title="DRDO Network Active" />
+            <button type="button" aria-label="Close menu" className="md:hidden m-press p-1.5 rounded-lg" onClick={() => setSidebarOpen(false)}><X className="w-4 h-4" /></button>
           </div>
 
           {/* Mode Switcher Buttons — 4 tabs */}
@@ -898,7 +932,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
             <button
               type="button"
               onClick={() => setWorkspaceMode("ai_agent")}
-              className={`flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg text-[10px] font-bold transition-all ${
+              className={`flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 m-press rounded-lg text-[11px] font-semibold ${
                 workspaceMode === "ai_agent" ? "shadow-sm" : "opacity-70 hover:opacity-100"
               }`}
               style={{
@@ -914,7 +948,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
             <button
               type="button"
               onClick={() => setWorkspaceMode("team_chat")}
-              className={`flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg text-[10px] font-bold transition-all ${
+              className={`flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 m-press rounded-lg text-[11px] font-semibold ${
                 workspaceMode === "team_chat" ? "shadow-sm" : "opacity-70 hover:opacity-100"
               }`}
               style={{
@@ -930,7 +964,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
             <button
               type="button"
               onClick={() => setWorkspaceMode("drdo_rag")}
-              className={`flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg text-[10px] font-bold transition-all ${
+              className={`flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 m-press rounded-lg text-[11px] font-semibold ${
                 workspaceMode === "drdo_rag" ? "shadow-sm" : "opacity-70 hover:opacity-100"
               }`}
               style={{
@@ -946,7 +980,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
             <button
               type="button"
               onClick={() => setWorkspaceMode("data_analyst")}
-              className={`flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg text-[10px] font-bold transition-all ${
+              className={`flex-1 flex items-center justify-center gap-1 py-1.5 px-1.5 m-press rounded-lg text-[11px] font-semibold ${
                 workspaceMode === "data_analyst" ? "shadow-sm" : "opacity-70 hover:opacity-100"
               }`}
               style={{
@@ -1088,7 +1122,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                 onDragLeave={() => setIsDragOver(false)}
                 onDrop={handleRagDrop}
                 onClick={() => !ragUploading && ragFileInputRef.current?.click()}
-                className="relative flex flex-col items-center justify-center gap-2 p-4 rounded-xl border-2 border-dashed cursor-pointer transition-all duration-200"
+                className="relative flex flex-col items-center justify-center gap-2 p-4 rounded-xl border-2 border-dashed cursor-pointer m-press"
                 style={{
                   borderColor: isDragOver ? "var(--primary-accent)" : "var(--border-subtle)",
                   background: isDragOver ? "var(--badge-bg)" : "var(--bg-input)",
@@ -1096,7 +1130,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
               >
                 {ragUploading ? (
                   <>
-                    <div className="w-6 h-6 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: "var(--primary-accent)", borderTopColor: "transparent" }} />
+                    <span className="m-dots" style={{ color: "var(--primary-accent)" }}><i /><i /><i /></span>
                     <span className="text-[10px] font-bold text-center" style={{ color: "var(--primary-accent)" }}>Processing PDF…</span>
                   </>
                 ) : (
@@ -1190,9 +1224,19 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
       <div className="flex-1 flex flex-col min-w-0 relative">
         {/* Header Bar */}
         <div
-          className="flex items-center justify-between px-6 py-3.5 border-b shrink-0 transition-colors duration-300"
+          className="flex items-center justify-between gap-3 px-3 sm:px-6 py-3 border-b shrink-0"
           style={{ borderColor: "var(--border-subtle)", background: "var(--bg-panel)" }}
         >
+          <button
+            type="button"
+            aria-label="Open menu"
+            aria-expanded={sidebarOpen}
+            className="md:hidden m-press shrink-0 p-2 -ml-1 rounded-lg border"
+            style={{ borderColor: "var(--border-subtle)" }}
+            onClick={() => setSidebarOpen(true)}
+          >
+            <Menu className="w-4 h-4" />
+          </button>
           {workspaceMode === "ai_agent" ? (
             <ModelRouting models={registryModels} />
           ) : workspaceMode === "team_chat" ? (
@@ -1203,16 +1247,16 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
             </div>
           ) : (
             /* DRDO RAG Header */
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden border shadow-sm shrink-0" style={{ background: "var(--bg-card)", borderColor: "var(--border-subtle)" }}>
+            <div className="hidden sm:flex items-center gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden border shrink-0" style={{ background: "var(--bg-card)", borderColor: "var(--border-subtle)" }}>
                 <img src="/drdo-logo.png" alt="DRDO Emblem" className="w-8 h-8 object-contain" />
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="font-black text-sm tracking-tight uppercase" style={{ color: "var(--text-main)" }}>DEFENCE RESEARCH &amp; DEVELOPMENT ORGANISATION</span>
-                  <span className="text-[9px] px-2 py-0.5 rounded font-extrabold uppercase border" style={{ background: "var(--badge-bg)", borderColor: "var(--badge-border)", color: "var(--badge-text)" }}>Govt. of India</span>
+                  <span className="font-bold text-sm tracking-tight truncate" style={{ color: "var(--text-main)" }}>Defence Research &amp; Development Organisation</span>
+                  <span className="hidden lg:inline text-[10px] px-2 py-0.5 rounded-md font-semibold border shrink-0" style={{ background: "var(--badge-bg)", borderColor: "var(--badge-border)", color: "var(--badge-text)" }}>Govt. of India</span>
                 </div>
-                <div className="flex items-center gap-2 text-[10px]" style={{ color: "var(--text-muted)" }}>
+                <div className="flex items-center gap-2 text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
                   <span className="font-bold" style={{ color: "var(--primary-accent)" }}>बलस्य मूलं विज्ञानम्</span>
                   <span>•</span>
                   <span>Ministry of Defence</span>
@@ -1224,15 +1268,15 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
           )}
 
           {/* Right Header Actions */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0 ml-auto">
             {workspaceMode === "drdo_rag" && (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 min-w-0">
                 <ModelRouting models={registryModels} />
                 <button
                   type="button"
                   onClick={() => setDeepResearch((v) => !v)}
                   aria-pressed={deepResearch}
-                  className="px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-all"
+                  className="m-press px-2.5 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap"
                   style={{
                     background: deepResearch ? "var(--badge-bg)" : "var(--bg-input)",
                     color: deepResearch ? "var(--text-main)" : "var(--text-muted)",
@@ -1261,7 +1305,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                 <button
                   type="button"
                   onClick={() => setUseStreaming((v) => !v)}
-                  className="px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-all"
+                  className="hidden sm:inline-flex m-press px-2.5 py-1.5 rounded-xl text-xs font-semibold border whitespace-nowrap"
                   style={{
                     background: useStreaming ? "var(--badge-bg)" : "var(--bg-input)",
                     color: useStreaming ? "var(--text-main)" : "var(--text-muted)",
@@ -1269,50 +1313,44 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                   }}
                   title="Toggle SSE Token Streaming mode"
                 >
-                  ⚡ {useStreaming ? "Stream SSE" : "Full Res"}
+                  {useStreaming ? "Streaming" : "Full response"}
                 </button>
               </div>
             )}
 
-            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold" style={{ background: "var(--badge-bg)", border: "1px solid var(--badge-border)", color: "var(--badge-text)" }}>
-              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span>Sub-10ms Engine Active</span>
+            <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold" style={{ background: "var(--badge-bg)", border: "1px solid var(--badge-border)", color: "var(--badge-text)" }}>
+              <div className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--ok)" }} />
+              <span>Engine online</span>
             </div>
 
             {/* Theme Toggle Button */}
-            <ThemeToggle showLabel />
+            <ThemeToggle showLabel={false} />
           </div>
         </div>
 
         {/* ── Main Chat Stream Content ── */}
-        <div className={`flex-1 overflow-y-auto px-4 sm:px-8 py-6 space-y-6 ${workspaceMode === "drdo_rag" ? "drdo-radar-bg" : ""}`}>
+        <div onScroll={(e) => { const el = e.currentTarget; setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 240); }} className={`flex-1 overflow-y-auto overflow-x-hidden px-4 sm:px-8 py-6 space-y-6 ${workspaceMode === "drdo_rag" ? "drdo-radar-bg" : ""}`}>
           {workspaceMode === "data_analyst" ? (
             <DataAnalystWorkspace />
           ) : workspaceMode === "drdo_rag" ? (
             /* ── DRDO RAG Chat Interface ── */
             ragMessages.length === 0 ? (
               /* DRDO RAG High-Impact Tactical Hero Screen */
-              <div className="h-full flex flex-col items-center justify-center max-w-2xl mx-auto text-center space-y-7 py-10 fade-in-up">
+              <div className="m-stagger min-h-full flex flex-col items-center justify-center max-w-2xl mx-auto text-center space-y-6 py-8">
                 
                 {/* Glowing Official DRDO Emblem */}
                 <div className="relative flex items-center justify-center">
-                  <div className="absolute inset-0 rounded-full radar-pulse opacity-40 bg-amber-500/20 blur-xl" />
-                  <div className="relative w-28 h-28 rounded-2xl flex items-center justify-center overflow-hidden border-2 shadow-2xl p-2" style={{ background: "var(--bg-card)", borderColor: "var(--border-hover)" }}>
-                    <img src="/drdo-logo.png" alt="DRDO Official Emblem" className="w-full h-full object-contain drop-shadow-xl" />
+                                    <div className="relative w-20 h-20 rounded-2xl flex items-center justify-center overflow-hidden border p-2" style={{ background: "var(--bg-card)", borderColor: "var(--border-hover)" }}>
+                    <img src="/drdo-logo.png" alt="DRDO Official Emblem" className="w-full h-full object-contain" />
                   </div>
                 </div>
 
                 {/* Hero Title & Security Badge */}
                 <div className="space-y-2">
-                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border shadow-sm" style={{ background: "var(--badge-bg)", borderColor: "var(--badge-border)", color: "var(--badge-text)" }}>
-                    <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_#10b981]" />
-                    <span>DEFENCE R&amp;D NETWORK • OFFICIAL KNOWLEDGE ENGINE</span>
-                  </div>
-
-                  <h1 className="text-2xl sm:text-4xl font-black tracking-tight" style={{ color: "var(--text-main)" }}>
-                    DRDO Master R&amp;D Intelligence Engine
+                                    <h1 className="text-2xl sm:text-3xl font-bold tracking-tight" style={{ color: "var(--text-main)" }}>
+                    Ask the DRDO knowledge base
                   </h1>
-                  <p className="text-xs font-bold tracking-wider" style={{ color: "var(--primary-accent)" }}>
+                  <p className="text-sm font-medium" style={{ color: "var(--text-muted)" }}>
                     बलस्य मूलं विज्ञानम् — Strength&apos;s Origin is in Science
                   </p>
                   
@@ -1324,27 +1362,27 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                 </div>
 
                 {/* Quick Prompts — Tactical HUD Cards with Light Beam Sweeps */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 w-full text-left pt-2">
+                <div className="m-stagger grid grid-cols-1 sm:grid-cols-2 gap-3 w-full text-left pt-2">
                   {DRDO_QUICK_PROMPTS.map((card, i) => {
                     const Icon = card.icon;
-                    const tagNames = ["[LABS DIRECTORY]", "[SPEC SHEET]", "[RADAR TECH]", "[YOUNG SCIENTISTS]"];
+                    const tagNames = ["Labs", "Specifications", "Radar", "Careers"];
                     return (
                       <button
                         key={i}
                         type="button"
                         onClick={() => handleRagQuery(card.prompt)}
-                        className="p-4 rounded-2xl decent-card-interactive text-left transition-all duration-200 border group"
+                        className="m-press p-4 rounded-2xl decent-card-interactive text-left border group"
                         style={{ background: "var(--bg-card)", borderColor: "var(--border-subtle)" }}
                       >
                         <div className="flex items-center justify-between mb-2">
                           <div className="w-7 h-7 rounded-xl flex items-center justify-center border shadow-xs" style={{ background: "var(--badge-bg)", borderColor: "var(--badge-border)" }}>
                             <Icon className="w-4 h-4" style={{ color: "var(--primary-accent)" }} />
                           </div>
-                          <span className="text-[9px] font-extrabold px-2 py-0.5 rounded-md uppercase tracking-wider border shimmer-badge" style={{ borderColor: "var(--badge-border)", color: "var(--badge-text)" }}>
+                          <span className="text-[11px] font-medium px-2 py-0.5 rounded-md border" style={{ borderColor: "var(--badge-border)", color: "var(--text-muted)" }}>
                             {tagNames[i]}
                           </span>
                         </div>
-                        <p className="text-xs font-bold group-hover:underline mb-1" style={{ color: "var(--text-main)" }}>
+                        <p className="text-sm font-semibold mb-1" style={{ color: "var(--text-main)" }}>
                           {card.prompt}
                         </p>
                         <p className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>
@@ -1359,12 +1397,12 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
               /* DRDO RAG Active Messages */
               <div className="max-w-3xl mx-auto space-y-6">
                 {ragMessages.map((msg) => (
-                  <div key={msg.id} className="space-y-3 fade-in-up">
+                  <div key={msg.id} className="space-y-3 m-rise">
                     {msg.sender === "user" ? (
                       /* User bubble */
                       <div className="flex justify-end">
                         <div
-                          className="max-w-xl px-4 py-3 rounded-2xl text-sm font-medium shadow-sm"
+                          className="max-w-[85%] sm:max-w-xl px-4 py-3 rounded-2xl text-sm font-medium break-words"
                           style={{
                             background: "var(--badge-bg)",
                             border: "1px solid var(--badge-border)",
@@ -1377,7 +1415,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                     ) : (
                       /* AI RAG Response */
                       <div className="flex items-start gap-3.5">
-                        <div className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden border border-cyan-500/40 bg-slate-950 shrink-0 mt-0.5 shadow-md">
+                        <div className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden border bg-slate-950 shrink-0 mt-0.5">
                           <img src="/drdo-logo.png" alt="DRDO Agent Logo" className="w-8 h-8 object-contain" />
                         </div>
 
@@ -1487,13 +1525,12 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
 
                 {/* RAG Generating Spinner */}
                 {ragLoading && (
-                  <div className="flex items-center gap-3 fade-in-up">
-                    <div className="w-8 h-8 rounded-xl flex items-center justify-center text-white shrink-0 shadow-sm" style={{ background: "linear-gradient(135deg, #1e3a5f, #0f6cbd)" }}>
-                      <Shield className="w-4 h-4 spin-smooth" />
-                    </div>
-                    <div className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)", color: "var(--text-muted)" }}>
-                      <div className="w-2 h-2 rounded-full bg-blue-500 animate-ping" />
-                      <span>Searching knowledge base & generating answer…</span>
+                  <div className="m-fade-in flex items-start gap-3.5" role="status" aria-label="Searching knowledge base and generating answer">
+                    <div className="m-skeleton w-9 h-9 shrink-0 rounded-xl" />
+                    <div className="flex-1 space-y-2 pt-1.5">
+                      <div className="m-skeleton h-3.5 w-3/4" />
+                      <div className="m-skeleton h-3.5 w-full" />
+                      <div className="m-skeleton h-3.5 w-1/2" />
                     </div>
                   </div>
                 )}
@@ -1503,16 +1540,16 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
           ) : workspaceMode === "ai_agent" ? (
             messages.length === 0 ? (
               /* ChatGPT / Gemini Style Empty Hero Screen */
-              <div className="h-full flex flex-col items-center justify-center max-w-2xl mx-auto text-center space-y-6 py-12 fade-in-up">
+              <div className="m-stagger min-h-full flex flex-col items-center justify-center max-w-2xl mx-auto text-center space-y-6 py-10">
                 <div
-                  className="w-16 h-16 rounded-3xl flex items-center justify-center text-white shadow-xl glow-card"
-                  style={{ background: "var(--primary-gradient)" }}
+                  className="w-14 h-14 rounded-2xl flex items-center justify-center"
+                  style={{ background: "var(--primary-accent)", color: "var(--btn-text)" }}
                 >
                   <Bot className="w-8 h-8" />
                 </div>
 
                 <div className="space-y-2">
-                  <h1 className="text-2xl sm:text-3xl font-black tracking-tight" style={{ color: "var(--text-main)" }}>
+                  <h1 className="text-2xl sm:text-3xl font-bold tracking-tight" style={{ color: "var(--text-main)" }}>
                     What can I help you build today?
                   </h1>
                   <p className="text-xs sm:text-sm max-w-md mx-auto" style={{ color: "var(--text-muted)" }}>
@@ -1574,12 +1611,12 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
               /* Active AI Stream Messages (ChatGPT / Gemini style) */
               <div className="max-w-3xl mx-auto space-y-6">
                 {messages.map((msg) => (
-                  <div key={msg.id} className="space-y-3 fade-in-up">
+                  <div key={msg.id} className="space-y-3 m-rise">
                     {msg.sender === "user" ? (
                       /* User Prompt Bubble */
                       <div className="flex justify-end">
                         <div
-                          className="max-w-xl px-4 py-3 rounded-2xl text-sm font-medium shadow-sm"
+                          className="max-w-[85%] sm:max-w-xl px-4 py-3 rounded-2xl text-sm font-medium break-words"
                           style={{
                             background: "var(--badge-bg)",
                             border: "1px solid var(--badge-border)",
@@ -1700,13 +1737,11 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
 
                 {/* AI Generating Spinner */}
                 {isGenerating && (
-                  <div className="flex items-center gap-3 fade-in-up">
-                    <div className="w-8 h-8 rounded-xl flex items-center justify-center text-white shrink-0 shadow-sm" style={{ background: "var(--primary-gradient)" }}>
-                      <Bot className="w-4 h-4 spin-smooth" />
-                    </div>
-                    <div className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)", color: "var(--text-muted)" }}>
-                      <div className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
-                      <span>VenuAI is processing prompt…</span>
+                  <div className="m-fade-in flex items-start gap-3" role="status" aria-label="Processing prompt">
+                    <div className="m-skeleton w-8 h-8 shrink-0 rounded-xl" />
+                    <div className="flex-1 space-y-2 pt-1.5">
+                      <div className="m-skeleton h-3.5 w-2/3" />
+                      <div className="m-skeleton h-3.5 w-full" />
                     </div>
                   </div>
                 )}
@@ -1716,7 +1751,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
             /* Team Messages Feed */
             <div className="max-w-3xl mx-auto space-y-4">
               {TEAM_MESSAGES.map((msg) => (
-                <div key={msg.id} className="flex items-start gap-3 p-3.5 rounded-2xl decent-card">
+                <div key={msg.id} className="m-rise flex items-start gap-3 p-3.5 rounded-2xl decent-card">
                   <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0" style={{ background: msg.avatarBg }}>
                     {msg.avatar}
                   </div>
@@ -1733,14 +1768,26 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
           )}
         </div>
 
+        {showJump && workspaceMode === "drdo_rag" && (
+          <button
+            type="button"
+            aria-label="Scroll to latest message"
+            onClick={() => ragMessagesEndRef.current?.scrollIntoView({ behavior: "smooth" })}
+            className="m-pop m-press absolute bottom-24 right-4 sm:right-8 z-10 w-9 h-9 rounded-full border flex items-center justify-center shadow-md"
+            style={{ background: "var(--bg-card)", borderColor: "var(--border-hover)", color: "var(--text-main)" }}
+          >
+            <ArrowDown className="w-4 h-4" />
+          </button>
+        )}
+
         {/* ── Prompt Input Bar — adapts to mode (DataAnalystWorkspace has its own input, so it's hidden for that mode) ── */}
         {workspaceMode !== "data_analyst" && (
-        <div className="p-4 sm:p-6 shrink-0 max-w-4xl w-full mx-auto">
-          <div className="rounded-3xl decent-card glow-card p-3 space-y-2">
+        <div className="px-3 pb-3 pt-1 sm:px-6 sm:pb-5 shrink-0 max-w-4xl w-full mx-auto">
+          <div className="input-glow rounded-2xl decent-card p-2.5 sm:p-3 space-y-2">
             {workspaceMode === "drdo_rag" ? (
               /* DRDO RAG Input */
               <div className="flex items-center gap-3 px-2">
-                <Shield className="w-4 h-4 shrink-0" style={{ color: "#4a9eff" }} />
+                <Shield className="w-4 h-4 shrink-0" style={{ color: "var(--text-subtle)" }} />
                 <input
                   id="rag-prompt-input"
                   type="text"
@@ -1749,7 +1796,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                   onKeyDown={(e) => { if (e.key === "Enter") handleRagQuery(); }}
                   placeholder="Ask anything about DRDO labs, missiles, radars, platforms…"
                   disabled={ragLoading}
-                  className="flex-1 bg-transparent text-sm outline-none font-medium"
+                  className="flex-1 min-w-0 bg-transparent text-sm outline-none font-medium"
                   style={{ color: "var(--text-main)" }}
                 />
                 {ragDocuments.length > 0 && (
@@ -1773,14 +1820,12 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                   type="button"
                   disabled={!ragInput.trim() || ragLoading}
                   onClick={() => handleRagQuery()}
-                  className={`p-2.5 rounded-2xl transition-all duration-200 ${
-                    ragInput.trim() && !ragLoading
-                      ? "hover:scale-105 shadow-md"
-                      : "opacity-40 cursor-not-allowed"
+                  className={`m-press p-2.5 rounded-xl ${
+                    ragInput.trim() && !ragLoading ? "" : "opacity-40 cursor-not-allowed"
                   }`}
                   style={
                     ragInput.trim() && !ragLoading
-                      ? { background: "linear-gradient(135deg, #1e3a5f, #0f6cbd)", color: "#fff" }
+                      ? { background: "var(--primary-accent)", color: "var(--btn-text)" }
                       : { background: "var(--bg-input)", color: "var(--text-subtle)" }
                   }
                 >
@@ -1795,7 +1840,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                   <button
                     type="button"
                     onClick={() => setWebSearchActive((v) => !v)}
-                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold transition-all border ${
+                    className={`flex items-center gap-1.5 m-press px-2.5 py-1 rounded-full text-[11px] font-semibold border ${
                       webSearchActive ? "border-emerald-500/40" : ""
                     }`}
                     style={{
@@ -1811,7 +1856,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                   <button
                     type="button"
                     onClick={() => setDeepThinkActive((v) => !v)}
-                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold transition-all border ${
+                    className={`flex items-center gap-1.5 m-press px-2.5 py-1 rounded-full text-[11px] font-semibold border ${
                       deepThinkActive ? "border-purple-500/40" : ""
                     }`}
                     style={{
@@ -1843,7 +1888,7 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                     onChange={(e) => setInputPrompt(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") handleSendPrompt(); }}
                     placeholder={workspaceMode === "ai_agent" ? "Ask VenuAI anything…" : `Message #${activeChannel}…`}
-                    className="flex-1 bg-transparent text-sm outline-none font-medium"
+                    className="flex-1 min-w-0 bg-transparent text-sm outline-none font-medium"
                     style={{ color: "var(--text-main)" }}
                   />
 
@@ -1861,10 +1906,8 @@ The tool call "${data.tool}" was denied.`.trim() } : m)));
                     type="button"
                     disabled={!inputPrompt.trim() || isGenerating}
                     onClick={() => handleSendPrompt()}
-                    className={`p-2.5 rounded-2xl transition-all duration-200 ${
-                      inputPrompt.trim() && !isGenerating
-                        ? "hover:scale-105 shadow-md"
-                        : "opacity-40 cursor-not-allowed"
+                    className={`m-press p-2.5 rounded-xl ${
+                      inputPrompt.trim() && !isGenerating ? "" : "opacity-40 cursor-not-allowed"
                     }`}
                     style={
                       inputPrompt.trim() && !isGenerating

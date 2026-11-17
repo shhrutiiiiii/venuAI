@@ -12,7 +12,7 @@ export function TraceButton({ traceId }: { traceId: string }) {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-bold hover:bg-slate-500/10 no-print"
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-bold m-press m-hover no-print"
         style={{ borderColor: "var(--border-subtle)", color: "var(--text-muted)" }}
       >
         <Activity className="w-3 h-3" /> Trace
@@ -52,9 +52,9 @@ export function TraceDrawer({ traceId, onClose }: { traceId: string; onClose: ()
 
   return (
     <div className="fixed inset-0 z-[80] flex justify-end no-print" role="dialog" aria-modal="true" aria-label="Request trace">
-      <button type="button" aria-label="Close trace" className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <button type="button" aria-label="Close trace" className="absolute inset-0 m-scrim" onClick={onClose} />
       <aside
-        className="relative w-full max-w-md h-full overflow-y-auto p-4 space-y-4 border-l text-xs"
+        className="m-drawer-right relative w-full max-w-md h-full overflow-y-auto p-4 space-y-4 border-l text-xs"
         style={{ background: "var(--bg-card)", borderColor: "var(--border-subtle)", color: "var(--text-main)" }}
       >
         <div className="flex items-center justify-between gap-2">

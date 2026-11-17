@@ -114,13 +114,13 @@ export function MemoryPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-[80] flex justify-end no-print" role="dialog" aria-modal="true" aria-label="Memory">
-      <button type="button" aria-label="Close memory" className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <aside className="relative w-full max-w-md h-full overflow-y-auto p-4 space-y-4 border-l text-xs" style={{ background: "var(--bg-card)", borderColor: "var(--border-subtle)", color: "var(--text-main)" }}>
+      <button type="button" aria-label="Close memory" className="absolute inset-0 m-scrim" onClick={onClose} />
+      <aside className="m-drawer-right relative w-full max-w-md h-full overflow-y-auto p-4 space-y-4 border-l text-xs" style={{ background: "var(--bg-card)", borderColor: "var(--border-subtle)", color: "var(--text-main)" }}>
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-sm font-bold flex items-center gap-2">
             <Brain className="w-4 h-4" /> Memory
           </h2>
-          <button type="button" onClick={onClose} aria-label="Close" className="p-1 rounded-lg hover:bg-slate-500/10">
+          <button type="button" onClick={onClose} aria-label="Close" className="m-press m-hover p-1 rounded-lg">
             <X className="w-4 h-4" />
           </button>
         </div>

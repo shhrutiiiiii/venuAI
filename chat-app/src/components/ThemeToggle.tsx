@@ -10,13 +10,19 @@ interface ThemeToggleProps {
 
 export default function ThemeToggle({ className = "", showLabel = false }: ThemeToggleProps) {
   const { theme, toggleTheme } = useTheme();
+  const handleClick = () => {
+    const root = document.documentElement;
+    root.classList.add("m-theme-switching");
+    toggleTheme();
+    window.setTimeout(() => root.classList.remove("m-theme-switching"), 350);
+  };
 
   return (
     <button
       id="theme-toggle-btn"
       type="button"
-      onClick={toggleTheme}
-      className={`relative inline-flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all duration-300 shadow-sm ${
+      onClick={handleClick}
+      className={`relative inline-flex items-center gap-2 px-3 py-1.5 rounded-full border m-press shadow-sm ${
         theme === "dark"
           ? "bg-slate-900/80 border-slate-700/80 text-cyan-300 hover:bg-slate-800 hover:border-slate-600"
           : "bg-white/90 border-slate-200 text-sky-600 hover:bg-slate-100 hover:border-slate-300"
