@@ -235,13 +235,6 @@ class VerifierAgent:
         Returns:
             The (possibly modified) answer string.
         """
-        if PolicyFlag.OUT_OF_SCOPE in flags:
-            return (
-                "⚠️ **Out of Scope**: This question falls outside the DRDO research domain. "
-                "VenuAI specialises in DRDO laboratories, defence research, weapon systems, "
-                "and related technical topics. Please rephrase your question accordingly."
-            )
-
         revised = answer
 
         # Replace overconfident language

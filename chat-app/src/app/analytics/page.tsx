@@ -177,7 +177,7 @@ export default function AnalyticsPage() {
                 <BarChart3 className="w-6 h-6" />
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-slate-100">DRDO VenuAI Admin Analytics</h1>
+                <h1 className="text-2xl font-bold text-slate-100">VENU-AI Admin Analytics</h1>
                 <p className="text-xs text-slate-400">
                   Real-time Grounding Trends, Guardrail Audit Logs & Domain Distribution
                 </p>

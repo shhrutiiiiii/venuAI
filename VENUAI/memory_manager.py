@@ -69,6 +69,8 @@ def _extract_key_facts(user_msg: str, ai_msg: str) -> List[str]:
 
 # ── MemoryManager ───────────────────────────────────────────────────────────────
 
+BASE_DIR = Path(__file__).resolve().parent
+
 class MemoryManager:
     """
     3-tier persistent memory for VenuAI.
@@ -78,7 +80,7 @@ class MemoryManager:
     Tier 3 — Semantic Memory (ChromaDB 'user_memory' collection, vector-searchable)
     """
 
-    def __init__(self, db_path: str = "VENUAI/venuai_memory.db") -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize the SQLite database and create tables if they don't exist.
         The ChromaDB collection is created lazily on first use to avoid
@@ -87,11 +89,25 @@ class MemoryManager:
         Args:
             db_path: Path to the SQLite database file.
         """
-        self._db_path = str(Path(db_path).resolve())
+        if db_path is None or db_path == "VENUAI/venuai_memory.db":
+            resolved = BASE_DIR / "venuai_memory.db"
+        else:
+            p = Path(db_path)
+            if not p.is_absolute():
+                if (BASE_DIR / p.name).exists() or not p.exists():
+                    resolved = BASE_DIR / p.name
+                else:
+                    resolved = p
+            else:
+                resolved = p
+        self._db_path = str(resolved.resolve())
         self._working: dict[str, list[dict]] = defaultdict(list)  # session_id → turns
         self._chroma_collection = None  # lazy-loaded
         self._embeddings = None         # lazy-loaded
-        self._init_db()
+        try:
+            self._init_db()
+        except Exception as e:
+            logger.warning(f"[MemoryManager] _init_db warning: {e}")
         logger.info(f"[MemoryManager] Initialized. SQLite: {self._db_path}")
 
     # ── SQLite initialisation ─────────────────────────────────────────────────
@@ -158,7 +174,7 @@ class MemoryManager:
             embed_fn = SentenceTransformerEmbeddingFunction(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
-            client = PersistentClient(path="VENUAI/chroma_db")
+            client = PersistentClient(path=str((BASE_DIR / "chroma_db").resolve()))
             self._chroma_collection = client.get_or_create_collection(
                 name="user_memory",
                 embedding_function=embed_fn,

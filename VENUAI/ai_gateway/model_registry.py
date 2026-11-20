@@ -59,6 +59,16 @@ class ModelEntry:
 # exists precisely so that correction happens in one place, not three.
 _CATALOG: List[ModelEntry] = [
     ModelEntry(
+        model_id="qwen/qwen3.8-27b",
+        provider="groq",
+        capabilities=[ModelCapability.REASONING, ModelCapability.FAST],
+        context_window=128_000,
+        max_output_tokens=32_768,
+        cost_tier="low",
+        latency_class="fast",
+        notes="Primary active model on Groq.",
+    ),
+    ModelEntry(
         model_id="llama-3.3-70b-versatile",
         provider="groq",
         capabilities=[ModelCapability.REASONING, ModelCapability.FAST],

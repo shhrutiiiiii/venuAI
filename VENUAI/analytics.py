@@ -21,7 +21,8 @@ from typing import List, Optional
 
 logger = logging.getLogger("drdo-rag")
 
-_DB_PATH = str(Path("VENUAI/venuai_memory.db").resolve())
+BASE_DIR = Path(__file__).resolve().parent
+_DB_PATH = str((BASE_DIR / "venuai_memory.db").resolve())
 
 
 class QueryAnalytics:
@@ -30,9 +31,19 @@ class QueryAnalytics:
     aggregated statistics for the analytics dashboard.
     """
 
-    def __init__(self, db_path: str = _DB_PATH) -> None:
-        self._db_path = db_path
-        self._init_db()
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        if db_path is None or db_path == _DB_PATH or db_path == "VENUAI/venuai_memory.db":
+            self._db_path = _DB_PATH
+        else:
+            p = Path(db_path)
+            if not p.is_absolute() and not p.exists() and (BASE_DIR / p.name).exists():
+                self._db_path = str((BASE_DIR / p.name).resolve())
+            else:
+                self._db_path = str(p.resolve())
+        try:
+            self._init_db()
+        except Exception as e:
+            logger.warning(f"[Analytics] _init_db warning: {e}")
 
     def _init_db(self) -> None:
         """Create the analytics table if it does not exist."""

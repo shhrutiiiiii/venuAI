@@ -50,6 +50,7 @@ import FormattedMarkdown from "@/components/FormattedMarkdown";
 import { ConfidenceBadge } from "@/components/ConfidenceBadge";
 import { VerificationPanel } from "@/components/VerificationPanel";
 import { AgentModeToggle, AgentMode } from "@/components/AgentModeToggle";
+import TelemetryStatusBar from "@/components/TelemetryStatusBar";
 import { StreamingMessage } from "@/components/StreamingMessage";
 import DataAnalystWorkspace from "@/components/DataAnalystWorkspace";
 
@@ -477,6 +478,15 @@ export default function ChatPage() {
               if (dataStr === "[DONE]") break;
               try {
                 const parsed = JSON.parse(dataStr);
+                if (parsed.error) {
+                  accumulatedText = `⚠️ Error: ${parsed.error}`;
+                  setRagMessages((prev) =>
+                    prev.map((msg) =>
+                      msg.id === aiMsgId ? { ...msg, text: accumulatedText, isError: true, isStreaming: false } : msg
+                    )
+                  );
+                  break;
+                }
                 if (parsed.token) {
                   // Accumulating streamed SSE tokens into a local `let`
                   // inside this async reader loop — plain imperative code
@@ -705,11 +715,11 @@ export default function ChatPage() {
         <div className="p-3.5 border-b space-y-3" style={{ borderColor: "var(--border-subtle)" }}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden bg-slate-950 border border-cyan-500/40 shadow-sm shrink-0">
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden bg-slate-950 border border-[#5ba0cc]/30 shadow-sm shrink-0">
                 <img src="/drdo-logo.png" alt="DRDO Official Logo" className="w-8 h-8 object-contain" />
               </div>
               <div>
-                <span className="text-sm font-black tracking-tight text-cyan-400 block uppercase">DRDO VenuAI</span>
+                <span className="text-sm font-black tracking-tight text-[#5ba0cc] dark:text-[#64a9d4] block uppercase">VENU-AI</span>
                 <span className="block text-[9px] font-bold tracking-wider text-slate-400 uppercase">Defence R&D Engine</span>
               </div>
             </div>
@@ -1109,30 +1119,17 @@ export default function ChatPage() {
           )}
 
           {/* Right Header Actions */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
+            {/* Command Control Dropdown (Direct RAG / ReAct / Multi-Swarm) */}
             {workspaceMode === "drdo_rag" && (
-              <div className="flex items-center gap-2">
-                <AgentModeToggle mode={agentMode} onChange={setAgentMode} />
-                <button
-                  type="button"
-                  onClick={() => setUseStreaming((v) => !v)}
-                  className="px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-all"
-                  style={{
-                    background: useStreaming ? "var(--badge-bg)" : "var(--bg-input)",
-                    color: useStreaming ? "var(--text-main)" : "var(--text-muted)",
-                    borderColor: useStreaming ? "var(--border-hover)" : "var(--border-subtle)"
-                  }}
-                  title="Toggle SSE Token Streaming mode"
-                >
-                  ⚡ {useStreaming ? "Stream SSE" : "Full Res"}
-                </button>
-              </div>
+              <AgentModeToggle mode={agentMode} onChange={setAgentMode} />
             )}
 
-            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold" style={{ background: "var(--badge-bg)", border: "1px solid var(--badge-border)", color: "var(--badge-text)" }}>
-              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span>Sub-10ms Engine Active</span>
-            </div>
+            {/* Unified Telemetry Status Bar (Health Monitor + <10ms Latency + Stream SSE Switch) */}
+            <TelemetryStatusBar
+              useStreaming={useStreaming}
+              onToggleStreaming={() => setUseStreaming((v) => !v)}
+            />
 
             {/* Theme Toggle Button */}
             <ThemeToggle showLabel />

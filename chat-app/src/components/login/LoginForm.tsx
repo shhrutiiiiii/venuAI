@@ -20,7 +20,6 @@ import { loginSchema, login as apiLogin } from "@/lib/authClient";
 type LoginFormInput = z.input<typeof loginSchema>;
 type LoginFormData = z.output<typeof loginSchema>;
 import { useAuth } from "@/contexts/AuthContext";
-import DemoCredentialsBadge from "./DemoCredentialsBadge";
 
 // ─── Floating Label Input ─────────────────────────────────────────────────────
 
@@ -171,23 +170,8 @@ export default function LoginForm() {
     }
   };
 
-  const handleDemoCredentials = useCallback(
-    (email: string, password: string) => {
-      setValue("email", email, { shouldValidate: true, shouldDirty: true });
-      setValue("password", password, { shouldValidate: true, shouldDirty: true });
-      setTimeout(() => {
-        handleSubmit(onSubmit)();
-      }, 300);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [setValue, handleSubmit]
-  );
-
   return (
     <div className="w-full max-w-md mx-auto space-y-4">
-      {/* Demo credentials badge */}
-      <DemoCredentialsBadge onUseCredentials={handleDemoCredentials} />
-
       {/* Form card */}
       <div className="rounded-2xl decent-card glow-card p-6 sm:p-7 space-y-5 fade-in-up">
         {/* Global error */}
@@ -344,7 +328,7 @@ export default function LoginForm() {
             <div className="grid grid-cols-2 gap-2.5">
               <button
                 type="button"
-                onClick={() => handleDemoCredentials("demo@chat.com", "demo12345")}
+                onClick={() => { window.location.href = "/api/auth/oauth/google/login"; }}
                 className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-semibold border transition-all duration-150 hover:bg-slate-500/5 active:scale-[0.98]"
                 style={{
                   background: "var(--bg-input)",
@@ -375,7 +359,7 @@ export default function LoginForm() {
 
               <button
                 type="button"
-                onClick={() => handleDemoCredentials("admin@chat.com", "admin12345")}
+                onClick={() => { window.location.href = "/api/auth/oauth/github/login"; }}
                 className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-semibold border transition-all duration-150 hover:bg-slate-500/5 active:scale-[0.98]"
                 style={{
                   background: "var(--bg-input)",

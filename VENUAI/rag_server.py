@@ -48,10 +48,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY not found in environment/.env")
 
-# Real Groq-served model id. The previous default ("qwen/qwen3.8-27b") did not
-# exist in Groq's catalog and silently fell through to the fallback list in
-# create_groq_completion() below. See Documents/architecture-decisions.md ADR-001.
-DEFAULT_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+# Real Groq-served model id.
+DEFAULT_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploaded_docs"
@@ -95,14 +93,14 @@ def load_prefilled_kb() -> dict:
 def create_groq_completion(client, messages, max_tokens=1500, temperature=0.2, stream=False):
     """
     Streaming completions with model fallback. Used only by /query/stream.
-    Not routed through AIGateway (VENUAI/ai_gateway/) — that gateway's
-    complete() is a single blocking call and does not support streaming;
-    see Documents/AI/model-routing.md "Not Yet Implemented". The fallback
-    model list still comes from the same ModelRegistry/Router the gateway
-    uses, so there is exactly one place or model ids are maintained.
     """
     from VENUAI.ai_gateway.model_router import TaskType, route
     candidate_models = [m.model_id for m in route(TaskType.GENERATION)] or [DEFAULT_MODEL]
+    if DEFAULT_MODEL not in candidate_models:
+        candidate_models.insert(0, DEFAULT_MODEL)
+    for fb in ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
+        if fb not in candidate_models:
+            candidate_models.append(fb)
     last_err = None
     for m in candidate_models:
         try:
@@ -993,18 +991,18 @@ def verify_node(state: RAGGraphState) -> dict:
 
 def fallback_kb_node(state: RAGGraphState) -> dict:
     kb_data = load_prefilled_kb()
-    if not kb_data:
-        raise HTTPException(status_code=404, detail="No documents in knowledge base.")
-
-    kb_text = json.dumps(kb_data, indent=2, ensure_ascii=False)
+    kb_text = json.dumps(kb_data, indent=2, ensure_ascii=False) if kb_data else ""
     llm = get_llm()
-    prompt_text = f"""You are VenuAI, an intelligent research assistant for DRDO.
-Answer the user's question using the DRDO Knowledge Base below.
-Format with ### headings, Markdown tables, bullet points, and **bold** key terms.
+    prompt_text = f"""You are VenuAI, an advanced, intelligent research assistant for DRDO and scientific engineering.
+Always answer the user's question clearly, thoroughly, accurately, and helpfully.
+If the question pertains to DRDO or defence, use the DRDO Knowledge Base below:
 
 --- DRDO KNOWLEDGE BASE ---
 {kb_text[:8000]}
 --- END ---
+
+If the question is general, conceptual, technical, or conversational, answer it fully and accurately using your broad knowledge base.
+Never refuse to answer a question.
 
 Question: {state['question']}
 Answer:"""
@@ -1391,22 +1389,30 @@ async def query_stream(
 
     async def event_generator():
         try:
-            mm = get_memory_manager()
-            mem_ctx = mm.get_context(req.session_id, req.user_id or "anonymous", req.question)
+            mm = None
+            mem_ctx = {"working": [], "episodic": "", "semantic": []}
+            try:
+                mm = get_memory_manager()
+                mem_ctx = mm.get_context(req.session_id, req.user_id or "anonymous", req.question)
+            except Exception as mem_err:
+                logger.warning(f"[stream] memory context warning: {mem_err}")
+
             effective_history = req.history or mem_ctx.get("working", [])
 
-            vs = get_vector_store()
-            stream_search_kwargs = {"k": req.top_k}
-            allowed_doc_ids = get_visible_doc_ids(current_user)
-            if allowed_doc_ids is not None:
-                stream_search_kwargs["filter"] = {"doc_id": {"$in": allowed_doc_ids or ["__none__"]}}
-            docs = vs.as_retriever(
-                search_type="similarity", search_kwargs=stream_search_kwargs
-            ).invoke(req.question)
+            docs = []
+            try:
+                vs = get_vector_store()
+                stream_search_kwargs = {"k": req.top_k}
+                allowed_doc_ids = get_visible_doc_ids(current_user)
+                if allowed_doc_ids is not None:
+                    stream_search_kwargs["filter"] = {"doc_id": {"$in": allowed_doc_ids or ["__none__"]}}
+                docs = vs.as_retriever(
+                    search_type="similarity", search_kwargs=stream_search_kwargs
+                ).invoke(req.question)
+            except Exception as vs_err:
+                logger.warning(f"[stream] vector search warning: {vs_err}")
 
-            # Phase 5: fold in table/image region hits — the last retrieval
-            # mode (standard, Agentic RAG, ReAct, multi-agent specialists,
-            # now streaming) missing this. Best-effort.
+            # Phase 5: fold in table/image region hits — best-effort.
             try:
                 from VENUAI.multimodal_retrieval import retrieve_multimodal_documents
                 region_docs = retrieve_multimodal_documents(req.question, allowed_doc_ids, top_k=3)
@@ -1463,11 +1469,15 @@ async def query_stream(
 
             yield f'data: {{"done": true, "sources": {json.dumps(sources_list)}, "grounding_score": 0.8}}\n\n'
 
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: mm.save_turn(
-                    req.session_id, req.user_id or "anonymous", req.question, full_answer
-                )
-            )
+            if mm is not None:
+                try:
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: mm.save_turn(
+                            req.session_id, req.user_id or "anonymous", req.question, full_answer
+                        )
+                    )
+                except Exception as save_err:
+                    logger.warning(f"[stream] save_turn warning: {save_err}")
         except Exception as e:
             logger.error(f"[stream] {e}")
             yield f'data: {{"error": {json.dumps(str(e))}}}\n\n'
