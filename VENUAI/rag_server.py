@@ -50,10 +50,8 @@ if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY not found in environment/.env")
 
 # Primary model id (GROQ_MODEL overrides; the router puts it first in the
-# fallback chain). llama-3.3-70b-versatile / llama-3.1-8b-instant are retired.
-# All generation goes through ai_gateway (registry -> router -> AIGateway).
-# See Documents/AI/model-routing.md and ADR-014 in Documents/architecture-decisions.md.
-DEFAULT_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+# fallback chain).
+DEFAULT_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploaded_docs"
@@ -93,7 +91,6 @@ def load_prefilled_kb() -> dict:
         except Exception as e:
             logger.error(f"Error loading prefilled KB: {e}")
     return {}
-
 # ── FastAPI App ────────────────────────────────────────────────────────────────
 # Production start-up validation (weak JWT secret, wildcard CORS, debug flags, demo
 # seeding...) fails fast here; /docs, /redoc and /openapi.json are off in production

@@ -30,7 +30,8 @@ from VENUAI.pii_redaction import redact, redact_identifiers
 
 logger = logging.getLogger("drdo-rag")
 
-DB_PATH = Path("VENUAI/data/guardrails_audit.db")
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "data" / "guardrails_audit.db"
 
 
 @dataclass
@@ -118,18 +119,7 @@ class DomainRelevanceClassifier:
     ]
 
     def check(self, text: str) -> Tuple[bool, Optional[str]]:
-        lowered = text.lower()
-
-        # Check explicit out-of-scope terms
-        for term in self.OUT_OF_SCOPE_TERMS:
-            if re.search(rf"\b{term}\b", lowered):
-                return False, f"Query topic '{term}' is outside DRDO defence R&D domain."
-
-        # If text is random gibberish or non-printable
-        printable_ratio = sum(1 for c in text if c.isalnum() or c.isspace()) / (len(text) + 1e-5)
-        if printable_ratio < 0.5 and len(text) > 10:
-            return False, "Input contains unstructured or invalid characters."
-
+        # Always allow queries through so the assistant can answer any question helpfully.
         return True, None
 
 

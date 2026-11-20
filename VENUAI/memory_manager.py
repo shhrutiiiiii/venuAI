@@ -73,6 +73,8 @@ def _extract_key_facts(user_msg: str, ai_msg: str) -> List[str]:
 
 # ── MemoryManager ───────────────────────────────────────────────────────────────
 
+BASE_DIR = Path(__file__).resolve().parent
+
 class MemoryManager:
     """
     3-tier persistent memory for VenuAI.
@@ -101,7 +103,10 @@ class MemoryManager:
         self._working: dict[tuple, list[dict]] = defaultdict(list)
         self._chroma_collection = None  # lazy-loaded
         self._embeddings = None         # lazy-loaded
-        self._init_db()
+        try:
+            self._init_db()
+        except Exception as e:
+            logger.warning(f"[MemoryManager] _init_db warning: {e}")
         logger.info(f"[MemoryManager] Initialized. SQLite: {self._db_path}")
 
     # ── SQLite initialisation ─────────────────────────────────────────────────

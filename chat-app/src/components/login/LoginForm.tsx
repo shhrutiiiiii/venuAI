@@ -20,7 +20,6 @@ import { loginSchema, login as apiLogin } from "@/lib/authClient";
 type LoginFormInput = z.input<typeof loginSchema>;
 type LoginFormData = z.output<typeof loginSchema>;
 import { useAuth } from "@/contexts/AuthContext";
-import DemoCredentialsBadge from "./DemoCredentialsBadge";
 
 // Demo credentials are a dev convenience only: hidden unless explicitly enabled.
 const SHOW_DEMO = process.env.NEXT_PUBLIC_SHOW_DEMO === "true";
@@ -177,23 +176,8 @@ export default function LoginForm() {
     }
   };
 
-  const handleDemoCredentials = useCallback(
-    (email: string, password: string) => {
-      setValue("email", email, { shouldValidate: true, shouldDirty: true });
-      setValue("password", password, { shouldValidate: true, shouldDirty: true });
-      setTimeout(() => {
-        handleSubmit(onSubmit)();
-      }, 300);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [setValue, handleSubmit]
-  );
-
   return (
     <div className="w-full max-w-md mx-auto space-y-4">
-      {/* Demo credentials badge */}
-      {SHOW_DEMO && <DemoCredentialsBadge onUseCredentials={handleDemoCredentials} />}
-
       {/* Form card */}
       <div className="rounded-2xl decent-card glow-card p-6 sm:p-7 space-y-5 fade-in-up">
         {/* Global error */}

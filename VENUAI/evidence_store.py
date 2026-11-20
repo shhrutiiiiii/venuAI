@@ -22,7 +22,7 @@ import uuid
 from pathlib import Path
 from typing import List, Optional
 
-DB_PATH = Path(__file__).resolve().parent / "data" / "evidence_explorer.db"   # cwd-independent
+DB_PATH = Path(__file__).resolve().parent / "data" / "evidence_explorer.db"
 
 
 def _get_conn() -> sqlite3.Connection:
